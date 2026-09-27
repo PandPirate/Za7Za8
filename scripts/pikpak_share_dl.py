@@ -82,6 +82,10 @@ class ShareError(PikPakError):
     """分享状态异常（不存在 / 过期 / 地区受限等）。"""
 
 
+class NetworkError(PikPakError):
+    """网络层错误（连不上目标、代理不可用等）。"""
+
+
 def md5_hex(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
@@ -152,7 +156,8 @@ def parse_link(link: str):
 class PikPakShare:
     """匿名访问 PikPak 分享的最小客户端。"""
 
-    def __init__(self, proxy: str | None = None, timeout: int = 30, verbose: bool = False):
+    def __init__(self, proxy: str | None = None, timeout: int = 30, verbose: bool = False,
+                 no_proxy: bool = False):
         self.device_id = gen_device_id()
         self.timestamp = str(int(time.time() * 1000))
         self.captcha_sign = calc_captcha_sign(self.device_id, self.timestamp)
@@ -160,9 +165,19 @@ class PikPakShare:
         self.verbose = verbose
         self._captcha_tokens: dict[str, str] = {}
 
-        handlers = []
-        if proxy:
+        # urllib 默认会自动使用环境变量和 Windows 系统代理设置。这里显式区分三种情况，
+        # 并记录“实际在用哪个出口”——代理没启动是这类脚本最常见的故障。
+        if no_proxy:
+            handlers = [urllib.request.ProxyHandler({})]   # 空字典 = 不使用任何代理
+            self.proxy_desc = "直连（已忽略环境/系统代理）"
+        elif proxy:
             handlers = self._proxy_handlers(proxy)
+            self.proxy_desc = proxy
+        else:
+            handlers = []
+            env_proxies = urllib.request.getproxies()
+            picked = env_proxies.get("https") or env_proxies.get("http")
+            self.proxy_desc = f"环境/系统代理 {picked}" if picked else "直连"
         self.opener = urllib.request.build_opener(*handlers)
 
         # 当前分享的上下文
@@ -206,6 +221,22 @@ class PikPakShare:
         except urllib.error.HTTPError as exc:
             # 业务错误也是 4xx + JSON body，这里照常返回
             return exc.code, exc.read().decode("utf-8", "replace")
+        except urllib.error.URLError as exc:
+            # 连不上（含代理不可用）：翻译成能照着做的提示，而不是甩一个原始堆栈
+            raise NetworkError(self._network_hint(url, exc.reason)) from None
+
+    def _network_hint(self, url: str, reason) -> str:
+        """把底层网络异常翻译成排查建议。"""
+        host = urllib.parse.urlparse(url).hostname or url
+        lines = [f"无法连接 {host}（出口: {self.proxy_desc}）：{reason}"]
+        if "直连" not in self.proxy_desc:
+            lines.append("这通常是代理不可用的症状（连接被拒绝 / 超时）。请确认："
+                         "① 代理软件已启动；② 端口没写错；"
+                         "③ 确实不需要代理时，把 --proxy 换成 --no-proxy")
+        else:
+            lines.append("请检查网络连通性；如果需要走代理，"
+                         "用 --proxy http://127.0.0.1:7890 显式指定")
+        return "\n".join(lines)
 
     @staticmethod
     def _loads(text: str):
@@ -456,12 +487,15 @@ def main(argv=None):
                "  %(prog)s https://mypikpak.com/s/xxxx\n"
                "  %(prog)s https://mypikpak.com/s/xxxx -p 提取码 --proxy http://127.0.0.1:7890\n"
                "  %(prog)s https://mypikpak.com/s/xxxx --json -o result.json\n"
-               "  %(prog)s https://mypikpak.com/s/xxxx --download ./downloads",
+               "  %(prog)s https://mypikpak.com/s/xxxx --download ./downloads\n"
+               "  %(prog)s https://mypikpak.com/s/xxxx --no-proxy   # 忽略环境里的代理",
     )
     parser.add_argument("link", help="PikPak 分享链接或 share_id")
     parser.add_argument("-p", "--pass-code", default=None, help="分享提取码")
     parser.add_argument("--proxy", default=None,
                         help="HTTP 代理，例如 http://127.0.0.1:7890（socks5 需 PySocks）")
+    parser.add_argument("--no-proxy", action="store_true",
+                        help="忽略环境变量 / 系统里的代理，强制直连")
     parser.add_argument("--no-recursive", action="store_true", help="不进入文件夹")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出")
     parser.add_argument("-o", "--output", help="把结果写入文件")
@@ -469,13 +503,17 @@ def main(argv=None):
     parser.add_argument("-v", "--verbose", action="store_true", help="打印请求细节")
     args = parser.parse_args(argv)
 
+    if args.proxy and args.no_proxy:
+        parser.error("--proxy 与 --no-proxy 不能同时使用")
+
     share_id, file_id, link_pass_code = parse_link(args.link)
     pass_code = args.pass_code if args.pass_code is not None else (link_pass_code or "")
 
-    client = PikPakShare(proxy=args.proxy, verbose=args.verbose)
+    client = PikPakShare(proxy=args.proxy, verbose=args.verbose, no_proxy=args.no_proxy)
 
     if args.verbose:
         print(f"[info] device_id={client.device_id}", file=sys.stderr)
+        print(f"[info] 出口: {client.proxy_desc}", file=sys.stderr)
 
     try:
         meta = client.open_share(share_id, pass_code)

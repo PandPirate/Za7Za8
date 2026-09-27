@@ -34,6 +34,7 @@ python scripts/pikpak_share_dl.py <链接> --json -o out.json   # 输出 JSON �
 python scripts/pikpak_share_dl.py <链接> --download ./dl      # 顺手下载
 python scripts/pikpak_share_dl.py <链接> --no-recursive       # 不进子文件夹
 python scripts/pikpak_share_dl.py <链接> -v                   # 打印请求细节
+python scripts/pikpak_share_dl.py <链接> --no-proxy           # 忽略环境/系统代理，强制直连
 ```
 
 输入形式都认：

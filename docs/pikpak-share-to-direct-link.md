@@ -1136,6 +1136,10 @@ def _proxy_handlers(proxy: str):
 
 ② `rdns=True` 表示**域名解析交给代理服务器做**（对应 `socks5h://` 里的 `h`）。这一点很关键：如果本地解析域名，会**泄露 DNS 查询**，而且可能因为本地 DNS 被污染而连不上。
 
+> **一个容易踩的坑**：`urllib` 会自动读取 `http_proxy` / `https_proxy` / `all_proxy` 等环境变量，**外加 Windows 系统代理设置**。如果环境里残留了一条指向“未运行代理”的配置，脚本会以 `WinError 10061 由于目标计算机积极拒绝，无法连接` 失败——看起来像“网络不通”，实际是**代理没启动**（被拒绝的是代理，不是目标网站）。
+>
+> 脚本会把这类错误翻译成可读提示，并打印**实际使用的出口**；`--no-proxy` 可以强制忽略环境代理。
+
 ### 6.3 顺带一提：把凭证放进 URL 查询参数
 
 本次分析还发现一件事：这些接口**同时接受把 `device_id` / `client_id` / `captcha_token` 放在 URL 查询参数里**。
@@ -1424,6 +1428,7 @@ key=lambda m: (not m.get("is_origin"), -m.get("priority", 0))
 
 | 报错 | 原因 | 解决 |
 |---|---|---|
+| `WinError 10061` / `Connection refused` | 指定的代理没在运行，或环境变量 / 系统代理指向了失效代理 | 启动代理；或改用 `--no-proxy` 直连（`-v` 会打印实际出口） |
 | `{"detail":"device_id is empty"}` | 没带 `x-device-id` | 补上，或放 query 参数 |
 | `{"detail":"captcha_token is empty"}` | 没带 `x-captcha-token` | 先走 Step 3-4 换令牌 |
 | `captcha_invalid: no client info found` | 令牌是假的/已失效 | 重新申请（脚本会自动重试一次） |
