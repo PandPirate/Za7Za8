@@ -194,8 +194,14 @@ scripts/pikpak_share_dl.py
 git diff -- AGENTS.md
 ```
 
-`--` 的作用是"后面这些是路径，不是分支名或选项"，避免同名文件/分支引起歧义。
+`--` 的作用是“后面这些是路径，不是分支名或选项”，避免同名文件/分支引起歧义。
 输出是标准的 diff：`+` 行是新增，`-` 行是删除。
+
+改动很大时，先加 `--stat` 只看统计（哪些文件、各增删多少行），不必被大段内容淹没：
+
+```bash
+git diff --stat
+```
 
 > 一个真实的坑：当时输出里的中文变成了 `缁欏湪鏈粨搴撳伐浣滅殑` 这样的乱码，
 > 那不是文件坏了，而是**终端按 GBK 解码了 UTF-8 字节**。文件本身没问题——
@@ -746,7 +752,7 @@ git --no-optional-locks status      # 不要为了优化显示去写索引
 | 读配置 / 配置来自哪 | `git config --get <键>`、`git config --list --show-origin` |
 | 看状态 | `git status`、`git status --short`、`git status -sb` |
 | 仓库跟踪了哪些文件 | `git ls-files` |
-| 看具体改动 | `git diff -- <路径>` |
+| 看具体改动 / 只看统计 | `git diff -- <路径>`、`git diff --stat` |
 | 暂存 | `git add -A`、`git add <路径>` |
 | 提交（信息从标准输入读） | `printf '%s\n' "标题" "" "正文" \| GIT_EDITOR=true git commit -F -` |
 | 改最近一次提交 | `git commit --amend -F -` |

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import random
@@ -413,7 +414,7 @@ class PikPakShare:
         links = []
 
         def add(url, name, resolution="", category="", expire="", is_origin=False,
-                priority=0, size=None):
+                priority=0, size=None, container=""):
             if not url:
                 return
             links.append({
@@ -424,6 +425,7 @@ class PikPakShare:
                 "expire": expire,
                 "is_origin": bool(is_origin),
                 "priority": priority,
+                "container": container,
                 "url": url,
             })
 
@@ -438,6 +440,7 @@ class PikPakShare:
                 is_origin=media.get("is_origin") or False,
                 priority=media.get("priority") or 0,
                 size=file_info.get("size"),
+                container=(media.get("video") or {}).get("video_type") or "",
             )
 
         # 部分文件（压缩包、文档等）直链在 links / web_content_link 里
@@ -451,14 +454,123 @@ class PikPakShare:
         return links
 
 
-def download(url: str, dest: str, timeout: int = 30):
-    """流式下载并打印进度。"""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = start = 0
+class TruncatedError(PikPakError):
+    """下载收到的字节数少于服务器声明的长度。"""
+
+
+# 下载过程中值得重试的异常。刻意不用宽泛的 OSError：磁盘写满之类的本地
+# 错误应该直接暴露出来，而不是被当成网络抖动重试几十次。
+NETWORK_ERRORS = (
+    urllib.error.URLError,      # 连接失败、超时、HTTP 4xx/5xx（HTTPError 是它的子类）
+    http.client.HTTPException,  # 响应没读完就断开（IncompleteRead 等）
+    ConnectionError,            # 连接被重置/中断（ConnectionResetError 等）
+    socket.timeout,             # 读超时（Python 3.10 起等同于 TimeoutError）
+)
+
+
+def build_opener(proxy: str | None = None, no_proxy: bool = False):
+    """按「显式代理 / 显式不走代理 / 交给系统」三种情况构造 opener。
+
+    第三种有坑：不传 ``ProxyHandler`` 时，urllib 会装上**默认的** ProxyHandler，
+    它会读 ``http_proxy`` / ``https_proxy`` 环境变量和 Windows 系统代理设置。
+    所以「传 None 就等于直连」是错的——真要直连必须给一个空的
+    ``ProxyHandler({})``。
+    """
+    if no_proxy:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if proxy:
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    return urllib.request.build_opener()
+
+
+def part_path(dest: str) -> str:
+    """下载中的临时文件名。
+
+    只有在「字节数校验通过」之后才改名成 dest，这样磁盘上永远不会
+    出现一个「看起来正常、其实只有一半」的成品文件。
+    """
+    return dest + ".part"
+
+
+def remote_size(url: str, proxy: str | None = None, no_proxy: bool = False,
+                timeout: int = 30):
+    """用 Range: bytes=0-0 换回 Content-Range，读出服务器端的真实总长度。
+
+    只取 1 个字节，不下载整个文件。失败返回 None。
+    """
+    opener = build_opener(proxy, no_proxy)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"})
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            cr = resp.headers.get("Content-Range") or ""
+            if "/" in cr:
+                tail = cr.rsplit("/", 1)[1].strip()
+                if tail.isdigit():
+                    return int(tail)
+            cl = resp.headers.get("Content-Length")
+            return int(cl) if cl and cl.isdigit() else None
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def _total_from_416(exc) -> int | None:
+    """从 416 响应里读出服务器上的真实总长度。
+
+    RFC 7233 规定 416 应带 ``Content-Range: bytes */TOTAL``——这是 Range 被拒时
+    唯一能问出「文件到底多大」的正规途径。
+    """
+    headers = getattr(exc, "headers", None)
+    cr = (headers.get("Content-Range") or "") if headers else ""
+    if "/" in cr:
+        tail = cr.rsplit("/", 1)[1].strip()
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
+def _download_attempt(opener, url: str, tmp: str, have: int,
+                      expect: int | None, timeout: int):
+    """跑一次下载尝试，返回服务器声明的总长度（None 表示没声明）。
+
+    只做「一次连接」（读响应 + 追加写 .part），不做重试决策：网络异常原样
+    抛给调用方。重试逻辑收在 :func:`download` 一处，网络错误和「传一半就断」
+    才能走同一条路。
+    """
+    headers = {"User-Agent": USER_AGENT}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+
+    with opener.open(urllib.request.Request(url, headers=headers),
+                     timeout=timeout) as resp:
+        mode = "ab" if (have and resp.status == 206) else "wb"
+        if have and mode == "wb":
+            print("  [提示] 服务器未返回 206，忽略已有数据重新下载", file=sys.stderr)
+            have = 0
+
+        # 服务器在本次响应里声明的总长度
+        total = expect
+        cr = resp.headers.get("Content-Range") or ""
+        if total is None:
+            if "/" in cr and cr.rsplit("/", 1)[1].strip().isdigit():
+                total = int(cr.rsplit("/", 1)[1])
+            elif resp.headers.get("Content-Length"):
+                total = have + int(resp.headers["Content-Length"])
+
+        done = have
         t0 = time.time()
-        with open(dest, "wb") as fh:
+        last = 0.0
+        # 边缘节点可能只肯给对象的一部分（对象还在生成 / 缓存没预热）：提前提示，
+        # 否则用户只会看到「下到一半就停」，莫名其妙。
+        if total and "/" in cr:
+            rng_part, _, _tot = cr.partition("/")
+            end = rng_part.partition("-")[2]
+            if end.isdigit() and int(end) + 1 < total:
+                print(f"  [提示] 这个 CDN 节点只返回了前 {human_size(int(end) + 1)}"
+                      f"（文件共 {human_size(total)}）——对象可能还在生成或缓存没预热",
+                      file=sys.stderr)
+        with open(tmp, mode) as fh:
             while True:
                 chunk = resp.read(CHUNK)
                 if not chunk:
@@ -466,17 +578,292 @@ def download(url: str, dest: str, timeout: int = 30):
                 fh.write(chunk)
                 done += len(chunk)
                 now = time.time()
-                if now - start > 0.3:
-                    start = now
-                    speed = done / max(now - t0, 1e-6)
+                if now - last > 0.3:
+                    last = now
+                    speed = (done - have) / max(now - t0, 1e-6)
                     if total:
-                        pct = done * 100 / total
-                        print(f"\r  {pct:5.1f}%  {human_size(done)}/{human_size(total)}"
+                        print(f"\r  {done * 100 / total:5.1f}%  "
+                              f"{human_size(done)}/{human_size(total)}"
                               f"  {human_size(speed)}/s", end="", file=sys.stderr)
                     else:
-                        print(f"\r  {human_size(done)}  {human_size(speed)}/s",
-                              end="", file=sys.stderr)
-    print(f"\r  完成: {dest} ({human_size(done)})" + " " * 24, file=sys.stderr)
+                        print(f"\r  {human_size(done)}"
+                              f"  {human_size(speed)}/s", end="", file=sys.stderr)
+        print("\r" + " " * 72 + "\r", end="", file=sys.stderr)
+        return total
+
+
+# 交互超时后默认选的档位标签
+DEFAULT_TAG = "720P"
+PICK_TIMEOUT = 30.0
+
+# 分享里的转码流是 MPEG-TS，分享名却常写 .mkv；按真实容器纠正扩展名
+CONTAINER_EXT = {
+    "mpegts": ".ts",
+    "matroska": ".mkv",
+    "matroska,webm": ".mkv",
+    "webm": ".webm",
+    "mp4": ".mp4",
+    "mov": ".mov",
+}
+
+
+def object_size_from_url(url: str):
+    """从直链的 f= 参数取对象的真实字节数（CDN 用它标识对象长度）。"""
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    value = (query.get("f") or [""])[0]
+    return int(value) if value.isdigit() else None
+
+
+def available_size(url: str, proxy: str | None = None, no_proxy: bool = False,
+                   timeout: int = 30):
+    """探测「服务器实际愿意给你多少字节」。失败返回 None。
+
+    这里**不能**用 Range 请求：``Range: bytes=0-0`` 回的 ``Content-Range`` 分母是
+    对象的真实大小，即使服务器只有一部分也会照实写总长（实测原画只给
+    699 510 782 字节，分母却写 1 214 642 730）。唯一可靠的信号是**不带 Range 的
+    普通 GET** 返回的 ``Content-Length``——只有副本完整时它才等于对象大小。
+
+    只读响应头就立刻关掉连接，不会真的把文件下下来。
+    """
+    opener = build_opener(proxy, no_proxy)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            length = resp.headers.get("Content-Length")
+            return int(length) if length and length.isdigit() else None
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def _win_readline(timeout: float):
+    """Windows 下带超时的单行输入；超时返回 None。"""
+    import msvcrt
+    deadline = time.time() + timeout
+    chars = []
+    while True:
+        if msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                return "".join(chars)
+            if ch == "\x03":                       # Ctrl+C
+                raise KeyboardInterrupt
+            if ch == "\x08":                       # 退格
+                if chars:
+                    chars.pop()
+                    print("\b \b", end="", flush=True)
+                continue
+            if ch in ("\x00", "\xe0"):             # 方向键等功能键：吃掉第二个字节
+                msvcrt.getwch()
+                continue
+            chars.append(ch)
+            print(ch, end="", flush=True)
+        elif time.time() >= deadline:
+            return None
+        else:
+            time.sleep(0.05)
+
+
+def _posix_readline(timeout: float):
+    import select
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    except (OSError, ValueError):
+        return None
+    return sys.stdin.readline() if ready else None
+
+
+def ask(prompt: str, timeout: float, default: str) -> str:
+    """带超时的输入；非交互环境（管道 / 重定向）不等待，直接用默认值。"""
+    if not (sys.stdin and sys.stdin.isatty()):
+        print(f"{prompt}{default}  # 非交互环境，自动采用默认值 "
+              f"（用 --pick 可指定别的档位）", file=sys.stderr)
+        return default
+    print(prompt, end="", flush=True, file=sys.stderr)
+    line = _win_readline(timeout) if os.name == "nt" else _posix_readline(timeout)
+    if line is None:
+        print(file=sys.stderr)
+        print(f"  [{timeout:.0f} 秒内没有输入，自动采用默认值 {default}]", file=sys.stderr)
+        return default
+    return line.strip() or default
+
+
+def choose_link(links: list, proxy: str | None = None, no_proxy: bool = False,
+                pick=None, timeout: float = PICK_TIMEOUT) -> dict:
+    """列出所有档位、标出哪些能完整下载，让用户挑一个。
+
+    每个档位都会先探测服务端**实际**能给的字节数：PikPak 的 CDN 边缘节点可能
+    只持有对象的一部分，这种档位下到中途就会断（详见 docs 的 Step 9.5）。探测
+    结果写回 ``link["server_size"]``，调用方不用再发一次请求。
+    """
+    total = len(links)
+    default_index = next(
+        (i for i, link in enumerate(links, 1)
+         if (link.get("resolution") or "").upper() == DEFAULT_TAG), 1)
+
+    if pick is not None:
+        if not (str(pick).isdigit() and 1 <= int(pick) <= total):
+            raise PikPakError(f"--pick 必须是 1..{total} 之间的整数，收到 {pick!r}")
+        chosen = links[int(pick) - 1]
+        chosen["server_size"] = available_size(chosen["url"], proxy, no_proxy)
+        return chosen
+
+    print("\n可选档位：", file=sys.stderr)
+    for i, link in enumerate(links, 1):
+        tag = link.get("resolution") or link.get("category") or "转码"
+        if link.get("is_origin"):
+            tag = f"原画/{tag}"
+        obj = object_size_from_url(link["url"])
+        avail = available_size(link["url"], proxy, no_proxy)
+        link["server_size"] = avail
+        if avail is None or not obj:
+            note = "完整度未知"
+        elif avail >= obj:
+            note = "可完整下载"
+        else:
+            note = (f"不完整：服务器只有 {human_size(avail)}"
+                    f"（{avail * 100 / obj:.0f}%），下到中途会停")
+        size_text = f"对象 {human_size(obj)}" if obj else "对象大小未知"
+        print(f"  {i}. {tag:<12s} {size_text:<20s} {note}", file=sys.stderr)
+
+    prompt = ("\n提示：PikPak 的 CDN 边缘节点可能只持有对象的一部分，"
+              "标「不完整」的档位会在中途停住。\n"
+              f"请选择要下载的档位 [1-{total}]，{timeout:.0f} 秒内无输入默认选 "
+              f"{DEFAULT_TAG}（第 {default_index} 项）：")
+    while True:
+        answer = ask(prompt, timeout, str(default_index))
+        if answer.isdigit() and 1 <= int(answer) <= total:
+            return links[int(answer) - 1]
+        print(f"  无效输入，请输入 1..{total} 之间的数字。", file=sys.stderr)
+
+
+def dest_for(directory: str, item: dict, link: dict) -> str:
+    """给下载文件起名。
+
+    非原画档会加上档位后缀（如 ``.720P``），避免和原画同名互相覆盖；容器是
+    MPEG-TS 的转码档还会把扩展名纠正成 ``.ts``——分享名常写 ``.mkv``，但转码
+    流其实是 TS，按原名保存会误导播放器。
+    """
+    name = os.path.basename(item.get("name") or item.get("id") or "download")
+    stem, ext = os.path.splitext(name)
+    if link.get("is_origin"):
+        return os.path.join(directory, name)
+    tag = (link.get("resolution") or link.get("category") or "transcode")
+    tag = tag.replace("/", "_")
+    ext = CONTAINER_EXT.get((link.get("container") or "").lower(), ext)
+    return os.path.join(directory, f"{stem}.{tag}{ext}")
+
+
+def download(url: str, dest: str, timeout: int = 30, expect: int | None = None,
+             proxy: str | None = None, no_proxy: bool = False, retries: int = 20):
+    """流式下载 + 断点续传 + 完整性校验。
+
+    设计要点（旧版会在 CDN 中途断开时静默地打印「完成」）：
+
+      1. 先写 ``dest.part``，字节数和服务器声明的长度一致才改名成 ``dest``；
+      2. 每次连接前先看本地已有多少字节，用 ``Range`` 从断点继续；
+      3. 只有三种情况算成功：服务器没给长度、实收等于声明、本地正好等于声明。
+         **本地比声明还长一律不算成功**——那说明两份数据混在一起了，会把
+         ``.part`` 挪到 ``.bad`` 再从零下载；
+      4. 网络层面的失败（连接被重置、读超时、响应没读完）计入重试，不崩栈；
+      5. PikPak 的 CDN 边缘节点**可能只持有对象的一部分**（对象还在生成、或缓存
+         没预热）：它会如实返回 ``Content-Range: bytes 0-N/TOTAL``，也会对超出自己
+         副本范围的 ``Range`` 直接回 416。同一个链接会被轮到不同节点，所以**多试
+         就有机会碰到完整节点**——重试次数由 ``retries`` 控制（命令行 --dl-retries）；
+      6. 403/404 之类永久性失败不空耗重试，直接给出可操作的报错。
+    """
+    opener = build_opener(proxy, no_proxy)
+    tmp = part_path(dest)
+    total = expect
+    stalled = 0        # 「毫无进展」的次数（无进展响应，或节点拒绝续传）
+
+    def discard_part(why: str) -> None:
+        """把对不上的 .part 挪到 .bad（只改名、不删除），保住证据也腾开位置。"""
+        bad = tmp + ".bad"
+        os.replace(tmp, bad)
+        print(f"  {why}。已把旧文件挪到 {bad}，重新从头下载。", file=sys.stderr)
+
+    attempt = 0
+    while True:
+        have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        if attempt == 0 and have:
+            print(f"  本地已有 {human_size(have)}，尝试从断点继续", file=sys.stderr)
+        if expect and have > expect:
+            discard_part(f"[数据对不上] 本地 .part 有 {human_size(have)}，"
+                         f"比服务器声明的 {human_size(expect)} 还长")
+            have = 0
+
+        try:
+            total = _download_attempt(opener, url, tmp, have, expect, timeout)
+            final = os.path.getsize(tmp)
+            if total is not None and final > total:
+                # 比服务器上的对象还长：两份不是同一份数据的续传
+                stalled += 1
+                reason = "[数据对不上]"
+                discard_part(f"[数据对不上] 本地 {human_size(final)} 比服务器上的"
+                             f" {human_size(total)} 还长")
+            elif total is None or final == total:
+                os.replace(tmp, dest)
+                note = "" if total else "  [警告] 服务器未提供长度，无法校验完整性"
+                print(f"  完成: {dest} ({human_size(final)}){note}", file=sys.stderr)
+                return final
+            else:
+                reason = (f"[不完整] {human_size(final)}/{human_size(total)}"
+                          f"（还差 {human_size(total - final)}）")
+                if final == have:
+                    stalled += 1
+                    reason = (f"[无进展] 服务器对 Range 请求没有返回数据"
+                              f"（本地仍是 {human_size(have)}）")
+                else:
+                    stalled = 0
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416:
+                # 本地数据不短于服务器上的对象 → Range 无法满足
+                total = _total_from_416(exc) or remote_size(url, proxy, no_proxy)
+                have_now = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+                if total and have_now == total:
+                    os.replace(tmp, dest)
+                    print(f"  完成: {dest} ({human_size(have_now)})"
+                          f"  [本地 .part 正好等于服务器长度，直接采用]", file=sys.stderr)
+                    return have_now
+                if total and have_now > total:
+                    stalled += 1
+                    reason = "[数据对不上]"
+                    discard_part(f"[数据对不上] 本地 {human_size(have_now)} 比服务器上的"
+                                 f" {human_size(total)} 还长")
+                else:
+                    # 本地还没下完、节点却拒绝续传：同一链接会被轮到不同节点，
+                    # 有的完整、有的只有一部分，所以值得再试几次。
+                    stalled += 1
+                    known = (f"服务器上共 {human_size(total)}" if total
+                             else "而且问不到服务器上的总长度")
+                    reason = (f"[节点数据不全] 本地 {human_size(have_now)}、{known}，"
+                              f"节点拒绝从这里继续")
+            elif 400 <= exc.code < 500:
+                # 403/404/410 这类是永久失败，重试 20 次没有意义
+                raise TruncatedError(
+                    f"服务器返回 HTTP {exc.code} {exc.reason}——直链可能已过期，"
+                    f"重新运行本脚本获取新的直链")
+            else:
+                reason = f"[网络错误] {exc}"        # 5xx：值得重试
+        except NETWORK_ERRORS as exc:
+            reason = f"[网络错误] {exc}"
+
+        attempt += 1
+        if attempt >= retries:
+            had = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            hint = ""
+            if stalled:
+                hint = ("\n  其中多数是「节点数据不全 / 无进展」——这是 PikPak CDN 侧对象不完整\n"
+                        "  （对象还在生成、或边缘缓存没预热）造成的，不是脚本或 .part 的问题。\n"
+                        "  同一个链接会被轮到不同节点，多试就有机会碰到完整节点：\n"
+                        "  加大 --dl-retries 重跑（例如 --dl-retries 200），或过一阵再试、"
+                        "换别的画质档。")
+            raise TruncatedError(
+                f"重试 {retries} 次仍未下完: {tmp} 有 {had} 字节，"
+                f"应为 {human_size(total) if total else '未知'}（其中 {stalled} 次毫无进展）。"
+                f"{hint}\n  已保留 .part，它是有效前缀，重跑可继续。")
+        print(f"  {reason}，第 {attempt} 次重试…", file=sys.stderr)
+        time.sleep(min(2 ** min(attempt, 5), 10))
 
 
 def main(argv=None):
@@ -488,6 +875,7 @@ def main(argv=None):
                "  %(prog)s https://mypikpak.com/s/xxxx -p 提取码 --proxy http://127.0.0.1:7890\n"
                "  %(prog)s https://mypikpak.com/s/xxxx --json -o result.json\n"
                "  %(prog)s https://mypikpak.com/s/xxxx --download ./downloads\n"
+               "  %(prog)s https://mypikpak.com/s/xxxx --download ./downloads --pick 3\n"
                "  %(prog)s https://mypikpak.com/s/xxxx --no-proxy   # 忽略环境里的代理",
     )
     parser.add_argument("link", help="PikPak 分享链接或 share_id")
@@ -500,6 +888,16 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", help="以 JSON 输出")
     parser.add_argument("-o", "--output", help="把结果写入文件")
     parser.add_argument("--download", metavar="DIR", help="直接下载到指定目录")
+    parser.add_argument("--pick", type=int, metavar="N",
+                        help="直接下载第 N 个档位（菜单里的序号），不提问。"
+                             "不指定时会在菜单里选：每个档位都标出能否完整下载，"
+                             "30 秒内无输入默认选 720P")
+    parser.add_argument("--pick-timeout", type=float, default=PICK_TIMEOUT, metavar="秒",
+                        help=f"菜单等待输入的时间，超时用默认档位（默认 {PICK_TIMEOUT:.0f} 秒）")
+    parser.add_argument("--dl-retries", type=int, default=20, metavar="N",
+                        help="下载最大重试次数（默认 20）。PikPak 的 CDN 边缘节点可能只持有"
+                             "对象的一部分，同一个链接会被轮到不同节点，调大就能一直换节点试"
+                             "（例如 --dl-retries 200）")
     parser.add_argument("-v", "--verbose", action="store_true", help="打印请求细节")
     args = parser.parse_args(argv)
 
@@ -580,13 +978,59 @@ def main(argv=None):
 
     if args.download:
         os.makedirs(args.download, exist_ok=True)
+        failures = 0
         for item in results:
             if not item["download_links"]:
+                print(f"\n跳过（没有可用直链）: {item['path']}", file=sys.stderr)
                 continue
-            best = item["download_links"][0]
-            dest = os.path.join(args.download, os.path.basename(item["name"] or item["id"]))
+
+            print(f"\n{item['path']}", file=sys.stderr)
+            try:
+                best = choose_link(item["download_links"], args.proxy, args.no_proxy,
+                                   pick=args.pick, timeout=args.pick_timeout)
+            except PikPakError as exc:
+                print(f"  选择档位失败: {exc}", file=sys.stderr)
+                failures += 1
+                continue
+
+            dest = dest_for(args.download, item, best)
+
+            # 期望大小只信服务器。file_info.size 是**原画**的大小，对转码档并不成立，
+            # 拿它当校验标准会把完整的转码文件误判成「截断」。
+            expect = remote_size(best["url"], args.proxy, args.no_proxy) \
+                or object_size_from_url(best["url"])
+            avail = best.get("server_size")
+            if expect:
+                extra = ""
+                if avail is not None:
+                    extra = f"，服务器实际可给 {human_size(avail)}（{avail * 100 / expect:.1f}%）"
+                print(f"  服务器声明大小: {human_size(expect)}{extra}", file=sys.stderr)
+                if avail is not None and avail < expect:
+                    print(f"  [警告] 这个档位服务端不完整，下到 {human_size(avail)} 就会停住。"
+                          f"已下的部分会留在 .part 里（是有效前缀，以后可续传）；"
+                          f"想拿到完整文件请选标「可完整下载」的档位。", file=sys.stderr)
+                if best.get("is_origin") and item["size"] and expect != item["size"]:
+                    print(f"  [注意] 与 file_info.size（{human_size(item['size'])}）不一致，"
+                          f"以服务器声明为准", file=sys.stderr)
+            # 已下完的（大小对得上）直接跳过；拿不到服务器大小时，
+            # 只有原画才敢用 file_info.size 兜底
+            want = expect or (item["size"] if best.get("is_origin") else None)
+            if want and os.path.exists(dest) and os.path.getsize(dest) == want:
+                print(f"  已下载完成，跳过: {dest}", file=sys.stderr)
+                continue
+
             print(f"下载 {dest}", file=sys.stderr)
-            download(best["url"], dest)
+            try:
+                download(best["url"], dest, expect=expect,
+                         proxy=args.proxy, no_proxy=args.no_proxy,
+                         retries=args.dl_retries)
+            except TruncatedError as exc:
+                # 单个文件失败不影响其余文件，最后统一用非 0 退出码表示有失败
+                print(f"  下载失败: {exc}", file=sys.stderr)
+                failures += 1
+
+        if failures:
+            return 1
 
     return 0
 
