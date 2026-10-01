@@ -207,6 +207,24 @@ git diff --stat
 > 那不是文件坏了，而是**终端按 GBK 解码了 UTF-8 字节**。文件本身没问题——
 > 换用能正确处理 UTF-8 的方式（比如编辑器里打开）就能确认。
 
+### `git diff --cached`（含 `--stat`）
+
+`git diff` 看的是**工作区**；一旦 `git add` 过，改动就不在工作区那条线上了，得改用
+`--cached` 看**暂存区**里的内容——也就是「我这次提交到底会提交什么」：
+
+```bash
+git diff --cached --stat          # 只看统计
+git --no-pager diff --cached      # 看完整 diff
+```
+
+本项目的用法：`git add` 之后、`git commit` 之前跑一次 `git diff --cached --stat`，
+把文件清单核对一遍，确认没多带东西（比如体积很大的下载产物）。这比事后靠
+`git log --stat` 去发现「提交了不该提交的」便宜得多。
+
+> 记法：`--cached` 就是 `--staged` 的同义词，指的是「已经在暂存区里的」，
+> 也就是 `git add` 做过的事。所以「工作区 vs 暂存区」用 `git diff`，
+> 「暂存区 vs 最后一次提交」用 `git diff --cached`。
+
 ---
 
 ## 3. 暂存与提交
@@ -355,6 +373,19 @@ git --no-pager show 353d7cb                  # 指定提交
 ```
 
 `HEAD` 表示"当前所在的提交"。也可以写成 `HEAD~1`（上一个）、`HEAD~2`（上两个）。
+
+### `git show -s --format=<格式>`
+
+`-s`（即 `--no-patch`）表示「不要 diff，只要提交本身的信息」。`git show` 和 `git log`
+支持同一套 `--format` 占位符（格式记号见[第 4 节](#4-看历史)里的 `git log --pretty=format:`）。
+
+```bash
+git --no-pager show -s --format='%H%n---%n%s%n---%n%b' HEAD
+```
+
+`%H` 完整哈希、`%s` 标题、`%b` 正文、`%n` 换行。本项目用它**核对刚写完的提交信息**：
+比 `git log -1` 更能一眼看清标题 / 正文 / trailer 的分界，用来确认 `AI-Model:`
+这类 trailer 真的写进去了。
 
 ### `git show <提交>:<路径>`
 
@@ -752,7 +783,7 @@ git --no-optional-locks status      # 不要为了优化显示去写索引
 | 读配置 / 配置来自哪 | `git config --get <键>`、`git config --list --show-origin` |
 | 看状态 | `git status`、`git status --short`、`git status -sb` |
 | 仓库跟踪了哪些文件 | `git ls-files` |
-| 看具体改动 / 只看统计 | `git diff -- <路径>`、`git diff --stat` |
+| 看具体改动（工作区 / 暂存区）/ 只看统计 | `git diff -- <路径>`、`git diff --stat`、`git diff --cached` |
 | 暂存 | `git add -A`、`git add <路径>` |
 | 提交（信息从标准输入读） | `printf '%s\n' "标题" "" "正文" \| GIT_EDITOR=true git commit -F -` |
 | 改最近一次提交 | `git commit --amend -F -` |
