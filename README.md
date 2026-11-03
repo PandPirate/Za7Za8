@@ -101,6 +101,14 @@ python scripts/pikpak_minimal.py
   - 排查决策树、字段速查表、常见报错对照表
   - 每条结论都标注了是「实测」还是「读代码推断」
 
+- [`docs/dbus-learning.md`](docs/dbus-learning.md)
+  —— D-Bus 学习路线（Arch Linux / SSH 环境），按「命令行 → 概念 → 客户端 →
+  服务端 → 读真实服务 → 进阶」拆成 6 步，包含：
+
+  - Arch 特有的环境问题：dbus-broker 与 dbus-daemon 怎么选、SSH 下没有会话总线怎么办
+  - 每一步都配了可直接执行的命令、代码和过关标准
+  - 两周日程表、常见坑、自测清单，以及可逐条勾选的学习待办
+
 ## 注意事项
 
 - **地区限制**：PikPak 的分享接口对大陆 IP 返回 `share_status=PROHIBITED`，
