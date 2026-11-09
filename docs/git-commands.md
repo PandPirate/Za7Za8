@@ -581,6 +581,21 @@ branch 'master' set up to track 'origin/master'.
 两边名字不一致就必须显式指定。也正因为如此，最后需要用别的办法（改仓库默认分支）来解决，
 而 `git push` 本身的语法就是上面这种 `源:目标` 形式。
 
+### `git branch --show-current`
+
+```bash
+git branch --show-current      # master
+```
+
+只打印当前分支名，没有星号、没有别的分支，脚本里可以直接取用。`git branch` 会多输出
+一行 `* master` 和全部本地分支，还得自己剥掉前缀。
+
+本项目的用例：提交前确认自己在 `master` 上，好决定 `git push origin master` 里写哪个
+分支名——这个仓库只有一条主干，写错名字就会推到别的分支去。
+
+> 和「还没有提交」时的区别：第 2 节说过，一个提交都没有时 `git branch` 什么都不显示，
+> 但 `git branch --show-current` 照样打出 `master`——它读的是 `HEAD` 指向，不遍历分支。
+
 ### `git branch -r` 与 `-a`
 
 ```bash
