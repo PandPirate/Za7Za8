@@ -1,0 +1,96 @@
+{
+  "league": "英超",
+  "season": "2026/27",
+  "captured_at": "2026-11-09T22:00:00+08:00",
+  "note": "离线快照：赛程来自 ESPN 比分接口与球迷屋赛程页，赛果只收录当天完赛的一场，不是完整一轮。",
+  "matches": [
+    {
+      "kickoff": "2026-11-08T16:30:00Z",
+      "home": "曼联",
+      "away": "阿斯顿维拉",
+      "score": [4, 4],
+      "state": "post",
+      "venue": "老特拉福德"
+    },
+    {
+      "kickoff": "2026-11-21T12:30:00Z",
+      "home": "曼城",
+      "away": "富勒姆",
+      "score": null,
+      "state": "pre",
+      "venue": "伊蒂哈德球场"
+    },
+    {
+      "kickoff": "2026-11-21T15:00:00Z",
+      "home": "伯恩茅斯",
+      "away": "诺丁汉森林",
+      "score": null,
+      "state": "pre",
+      "venue": "维塔利蒂球场"
+    },
+    {
+      "kickoff": "2026-11-21T15:00:00Z",
+      "home": "阿斯顿维拉",
+      "away": "桑德兰",
+      "score": null,
+      "state": "pre",
+      "venue": "维拉公园"
+    },
+    {
+      "kickoff": "2026-11-21T15:00:00Z",
+      "home": "切尔西",
+      "away": "利兹联",
+      "score": null,
+      "state": "pre",
+      "venue": "斯坦福桥"
+    },
+    {
+      "kickoff": "2026-11-21T15:00:00Z",
+      "home": "考文垂",
+      "away": "水晶宫",
+      "score": null,
+      "state": "pre",
+      "venue": "考文垂建筑协会球场"
+    },
+    {
+      "kickoff": "2026-11-21T15:00:00Z",
+      "home": "热刺",
+      "away": "伊普斯维奇",
+      "score": null,
+      "state": "pre",
+      "venue": "托特纳姆热刺球场"
+    },
+    {
+      "kickoff": "2026-11-21T17:30:00Z",
+      "home": "纽卡斯尔",
+      "away": "阿森纳",
+      "score": null,
+      "state": "pre",
+      "venue": "圣詹姆斯公园"
+    },
+    {
+      "kickoff": "2026-11-22T14:00:00Z",
+      "home": "赫尔城",
+      "away": "布莱顿",
+      "score": null,
+      "state": "pre",
+      "venue": "MKM 球场"
+    },
+    {
+      "kickoff": "2026-11-22T16:30:00Z",
+      "home": "利物浦",
+      "away": "曼联",
+      "score": null,
+      "state": "pre",
+      "venue": "安菲尔德"
+    },
+    {
+      "kickoff": "2026-11-23T20:00:00Z",
+      "home": "布伦特福德",
+      "away": "埃弗顿",
+      "score": null,
+      "state": "pre",
+      "venue": "Gtech 社区球场"
+    }
+  ]
+}

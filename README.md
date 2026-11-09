@@ -90,6 +90,129 @@ python scripts/pikpak_share_dl.py <链接> --no-proxy           # 忽略环境/�
 python scripts/pikpak_minimal.py
 ```
 
+### `scripts/cn_holiday_ics.py`
+
+把国务院办公厅公布的法定节假日安排生成 `.ics` 日历，导入 Outlook / Google 日历 /
+Apple 日历后，月视图里一眼能看出哪天放假、哪个周末要补班。纯标准库，Python 3.8+。
+
+```bash
+python scripts/cn_holiday_ics.py                    # 2027 年，输出 downloads/2027中国节假日.ics
+python scripts/cn_holiday_ics.py -o 2027.ics        # 换个输出路径
+python scripts/cn_holiday_ics.py --holidays-only    # 只要放假日，不要调休上班日
+python scripts/cn_holiday_ics.py --no-alarms        # 补班日不加提醒
+```
+
+每个放假日一条全天事件（标「空闲」），每个调休上班日也有一条（标「忙」，并在前一天
+9 点提醒）。数据是手工维护的：每年 11 月通知出来后，把 `YEAR_DATA` 里新一年的
+`blocks` / `workdays` 照通知原文抄进去就行。
+
+生成前会用通知里写明的「日期（星期）」自检一遍，抄错日期、星期对不上都会直接报错，
+所以改完数据跑一次就知道有没有抄错。
+
+### `scripts/football_ics.py`
+
+把英超 / 欧冠赛程生成 `.ics` 日历。开球时间按北京时间录入，写进 ICS 时换算成 UTC，
+导入任何客户端都不会因为时区设置差一小时。
+
+```bash
+python scripts/football_ics.py                 # 英超 + 欧冠，输出 downloads/
+python scripts/football_ics.py --only 欧冠      # 只导出一项赛事
+python scripts/football_ics.py --no-alarms     # 不加赛前 30 分钟提醒
+```
+
+数据在脚本顶部的 `MATCHES` 里维护（赛事、轮次、北京时间、主客队、场地）。生成前按
+轮次自检：每轮场数够不够、同一轮有没有球队重复出场、每队总出场次数是否一致——抄漏
+或者抄重都会直接报错。每场比赛默认 2 小时、标「忙」，并带一个赛前 30 分钟的提醒。
+
+### `scripts/send_digest.py`
+
+可插拔的摘要邮件框架：**插件出内容，框架管版式和投递**。一个插件挂掉不会影响别的
+插件，也不会发出一封半成品——没内容的区块直接不出现。
+
+```bash
+python scripts/send_digest.py --list                       # 有哪些插件
+python scripts/send_digest.py --dry-run                    # 生成预览（.eml + .html），不发信
+python scripts/send_digest.py --dry-run --offline          # 不联网，用插件自带快照
+python scripts/send_digest.py --plugin premier_league      # 只跑某个插件（可重复）
+```
+
+发信前配 SMTP，然后去掉 `--dry-run`：
+
+```bash
+export MAILER_SMTP_HOST=smtp.qq.com      # Windows: set / $env:
+export MAILER_SMTP_PORT=587              # 465 用 MAILER_SMTP_TLS=ssl
+export MAILER_SMTP_USER=you@qq.com
+export MAILER_SMTP_PASS=授权码
+export MAILER_TO=me@example.com
+python scripts/send_digest.py            # 真发
+```
+
+自带的两个插件：
+
+| 插件 | 说明 |
+| --- | --- |
+| `premier_league` | 英超上一轮赛果、下一轮赛程、看点，并把赛程写进 Outlook 日历 |
+| `example` | 演示插件契约，`--plugin example` 才跑 |
+
+**邮件里只有数据，没有第三方内容。** 赛果是比分、赛程是北京时间、看点是自动算出来的
+（进球大战、焦点战），不带战报、集锦、球队新闻，也不挂附件。
+
+**日历只有一条落地方式：Microsoft Graph。** 邮件正文里会先排一份日历（一排日期格子，
+有比赛的日期点亮、标场次，下面按天分组），然后同一批日程通过 Graph 写进你 Outlook 里
+一个叫「英超赛程 2026-27」的日历文件夹：每场 2 小时、标「空闲」、赛前 30 分钟提醒，
+按 `subject + 开始时间` 去重，重跑只更新不重复，也不碰你别的日程。
+
+不发 `.ics` 附件，也不用 Windows 上的本机 Outlook（COM 只能桌面跑，服务器上没有）。
+
+```bash
+python scripts/send_digest.py --dry-run                      # 预览 + 演练日历（不落库）
+python scripts/send_digest.py --dry-run --apply-calendar     # 预览 + 真写日历
+python scripts/send_digest.py --calendar none                # 只发内容，不碰日历
+```
+
+`--dry-run` 默认只**演练**（正文里写「演练：将同步到 …」），加 `--apply-calendar` 才
+真的写；没配 Graph 时 `auto` 会跳过日历，并在正文里写明原因。
+
+#### 配置 Graph（一次性）
+
+1. [Azure 门户](https://portal.azure.com) → Microsoft Entra ID → 应用注册 → 新注册；
+   账户类型选**「任何组织目录中的账户和个人 Microsoft 账户」**；
+2. 该应用 → 身份验证 → **允许公共客户端流** → 是（设备代码流需要）；
+3. API 权限 → 添加权限 → Microsoft Graph → **委托的权限** → `Calendars.ReadWrite`；
+   个人账户不需要管理员同意；
+4. 复制「应用程序(客户端) ID」。
+
+```bash
+export MAILER_GRAPH_CLIENT_ID=<客户端 ID>
+# 可选：MAILER_GRAPH_TENANT（默认 common）、MAILER_GRAPH_TOKEN（默认 downloads/.graph_token.json）
+python scripts/send_digest.py --graph-login      # 按提示打开网址、输入代码、登录同意
+python scripts/send_digest.py --calendar graph --dry-run --apply-calendar
+```
+
+token 存在 `downloads/.graph_token.json`（已 gitignore，**等于密码，别外传**），过期会用
+refresh_token 自动续；`--graph-logout` 删掉它。
+
+**加插件**就是往 `scripts/mailer/plugins/` 里丢一个模块，暴露 `PLUGIN` 对象：
+
+```python
+from ..core import Section
+
+class MyPlugin:
+    name = "my_plugin"
+    title = "我的区块"
+    description = "一句话说明发什么"
+    enabled_by_default = False      # True 就默认进邮件
+
+    def build(self, ctx):           # ctx.now / ctx.http_json / ctx.snapshot
+        return Section(key=self.name, title=self.title, html="<p>hi</p>", text="hi")
+
+PLUGIN = MyPlugin()
+```
+
+框架靠 `pkgutil` 自动发现，不用改注册表。插件里想写日历，就照英超插件那样组
+`CalendarEvent` 交给 `mailer.calendar_sync.sync()`。想定时发就挂 cron / 计划任务，
+脚本是幂等的。
+
 ## 文档
 
 - [`docs/pikpak-share-to-direct-link.md`](docs/pikpak-share-to-direct-link.md)
