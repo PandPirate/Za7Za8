@@ -208,6 +208,15 @@ def access_token(creds: Optional[Creds] = None) -> str:
 # ---------------------------------------------------------------- 日历
 
 
+def whoami(creds: Optional[Creds] = None) -> Dict:
+    """当前 token 属于哪个账号——日历就写到它名下。"""
+    return _call(
+        "GET",
+        "{}/me?$select=displayName,userPrincipalName,mail".format(GRAPH),
+        access_token(creds),
+    )
+
+
 def ensure_calendar(token: str, name: str) -> str:
     """找到同名日历，没有就新建一个。"""
     listing = _call("GET", "{}/me/calendars?$select=id,name&$top=100".format(GRAPH), token)

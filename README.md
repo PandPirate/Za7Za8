@@ -175,18 +175,15 @@ python scripts/send_digest.py --calendar none                # 只发内容，�
 
 #### 配置 Graph（一次性）
 
-1. [Azure 门户](https://portal.azure.com) → Microsoft Entra ID → 应用注册 → 新注册；
-   账户类型选**「任何组织目录中的账户和个人 Microsoft 账户」**；
-2. 该应用 → 身份验证 → **允许公共客户端流** → 是（设备代码流需要）；
-3. API 权限 → 添加权限 → Microsoft Graph → **委托的权限** → `Calendars.ReadWrite`；
-   个人账户不需要管理员同意；
-4. 复制「应用程序(客户端) ID」。
+需要一个**允许个人账户**的 Azure 应用（拿客户端 ID），再在跑任务的机器上 `--graph-login`
+一次，token 就缓存在本地。完整步骤、报错对照表在
+[`docs/outlook-graph-calendar.md`](docs/outlook-graph-calendar.md)。
 
 ```bash
 export MAILER_GRAPH_CLIENT_ID=<客户端 ID>
-# 可选：MAILER_GRAPH_TENANT（默认 common）、MAILER_GRAPH_TOKEN（默认 downloads/.graph_token.json）
-python scripts/send_digest.py --graph-login      # 按提示打开网址、输入代码、登录同意
-python scripts/send_digest.py --calendar graph --dry-run --apply-calendar
+python scripts/send_digest.py --graph-login        # 浏览器输码、用要写日历的账号同意
+python scripts/send_digest.py --graph-whoami       # 确认 token 属于哪个账号
+python scripts/send_digest.py --dry-run --apply-calendar
 ```
 
 token 存在 `downloads/.graph_token.json`（已 gitignore，**等于密码，别外传**），过期会用
@@ -231,6 +228,15 @@ PLUGIN = MyPlugin()
   - Arch 特有的环境问题：dbus-broker 与 dbus-daemon 怎么选、SSH 下没有会话总线怎么办
   - 每一步都配了可直接执行的命令、代码和过关标准
   - 两周日程表、常见坑、自测清单，以及可逐条勾选的学习待办
+
+- [`docs/outlook-graph-calendar.md`](docs/outlook-graph-calendar.md)
+  —— 让 `send_digest.py` 把赛程写进 Outlook 日历，包含：
+
+  - 为什么只有 Graph 这一条路（本机 COM 和 `.ics` 各自卡在哪）
+  - Azure 应用注册的逐步操作，每步都写了「该看到什么」
+  - 设备代码登录、`--graph-whoami` 验证、token 存哪、怎么换账号
+  - 报错对照表（`AADSTS50020`、`700016`、`7000218`、`65001`）
+  - cron 与换机器的注意事项，以及为啥这不是「绑定账户」
 
 ## 注意事项
 

@@ -55,18 +55,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true", help="打印调试日志")
     parser.add_argument("--graph-login", action="store_true", help="设备代码登录 Microsoft Graph（一次即可）")
     parser.add_argument("--graph-logout", action="store_true", help="删掉本地缓存的 Graph token")
+    parser.add_argument("--graph-whoami", action="store_true", help="当前 token 属于哪个账号（日历就写到它名下）")
     return parser
 
 
 def _graph_auth(args) -> int:
-    """--graph-login / --graph-logout：设备代码登录，token 缓存在 downloads/.graph_token.json。"""
-    from .graph_calendar import GraphError, device_login, load_creds
+    """--graph-login / --graph-logout / --graph-whoami：设备代码登录，token 缓存在 downloads/.graph_token.json。"""
+    from .graph_calendar import GraphError, device_login, load_creds, whoami
 
     creds = load_creds()
     if creds is None:
         print("先设置环境变量 MAILER_GRAPH_CLIENT_ID（Azure 应用的客户端 ID）", file=sys.stderr)
-        print("注册步骤见 README 的「Linux 上直接写 Outlook 日历」一节", file=sys.stderr)
+        print("注册步骤见 README 的「配置 Graph」一节", file=sys.stderr)
         return 2
+
+    if args.graph_whoami:
+        try:
+            me = whoami(creds)
+        except GraphError as exc:
+            print("查询失败：{}".format(exc), file=sys.stderr)
+            return 1
+        print("当前 token 属于：{}".format(me.get("displayName") or "?"))
+        print("账号：{}".format(me.get("userPrincipalName") or me.get("mail") or "?"))
+        print("日历会写到这个账号的邮箱里")
+        return 0
 
     if args.graph_logout:
         if creds.token_path.exists():
@@ -93,7 +105,7 @@ def main(argv=None) -> int:
 
     plugins = load_plugins()
 
-    if args.graph_login or args.graph_logout:
+    if args.graph_login or args.graph_logout or args.graph_whoami:
         return _graph_auth(args)
 
     if args.list:
