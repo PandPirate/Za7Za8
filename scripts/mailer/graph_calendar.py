@@ -18,6 +18,7 @@ API 权限勾 Calendars.ReadWrite（委托），**不需要管理员同意**。
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import stat
@@ -34,12 +35,18 @@ from .core import UTC
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 AUTHORITY = "https://login.microsoftonline.com/{tenant}"
-SCOPES = "offline_access Calendars.ReadWrite"
+# 个人账户拿到的不透明票（EwB…）Graph 也接受，scope 写法不影响能不能用；
+# 留着环境变量只是方便临时换权限试
+SCOPES = os.environ.get("MAILER_GRAPH_SCOPE") or "offline_access Calendars.ReadWrite"
 DEFAULT_TOKEN = Path(__file__).resolve().parents[2] / "downloads" / ".graph_token.json"
 
 
 class GraphError(RuntimeError):
-    pass
+    """带上 OAuth 的 error 码（authorization_pending 之类），光看描述文字不够可靠。"""
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -84,16 +91,20 @@ def _write_cache(path: Path, payload: Dict) -> None:
 # ---------------------------------------------------------------- HTTP
 
 
-def _detail(exc: HTTPError) -> str:
+def _detail(exc: HTTPError) -> "tuple[str, str]":
+    """把 HTTP 错误拆成 (error 码, 描述)。OAuth 的 error 是字符串，Graph 的是对象。"""
     try:
         body = json.loads(exc.read().decode("utf-8"))
     except Exception:
-        return "HTTP {}".format(getattr(exc, "code", "?"))
-    return (
-        body.get("error_description")
-        or (body.get("error") or {}).get("message")
-        or str(body.get("error"))
-    )
+        return "", "HTTP {}".format(getattr(exc, "code", "?"))
+    raw = body.get("error")
+    if isinstance(raw, dict):
+        code = raw.get("code") or ""
+        message = raw.get("message") or ""
+    else:
+        code = raw or ""
+        message = ""
+    return code, body.get("error_description") or message or str(raw)
 
 
 def _post_form(url: str, data: Dict, timeout: int = 30) -> Dict:
@@ -106,7 +117,8 @@ def _post_form(url: str, data: Dict, timeout: int = 30) -> Dict:
         with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        raise GraphError(_detail(exc))
+        code, message = _detail(exc)
+        raise GraphError(message, code=code)
     except URLError as exc:
         raise GraphError("连不上 {}：{}".format(url.split("/")[2], exc.reason))
 
@@ -125,8 +137,13 @@ def _call(method: str, url: str, token: str, payload: Optional[Dict] = None, tim
             return json.loads(raw) if raw else {}
     except HTTPError as exc:
         if exc.code == 401:
-            raise GraphError("登录已失效，重新跑一次 --graph-login")
-        raise GraphError(_detail(exc))
+            code, message = _detail(exc)
+            raise GraphError(
+                "token 被拒（HTTP 401）：{} {}".format(code or "?", message or "").strip(),
+                code="unauthorized",
+            )
+        code, message = _detail(exc)
+        raise GraphError(message, code=code)
     except URLError as exc:
         raise GraphError("连不上 graph.microsoft.com：{}".format(exc.reason))
 
@@ -138,9 +155,26 @@ def device_login(creds: Creds, echo=print) -> None:
     """设备代码流：打印一个短码，用户在浏览器里输入即可。"""
     base = AUTHORITY.format(tenant=creds.tenant)
     device = _post_form(base + "/oauth2/v2.0/devicecode", {"client_id": creds.client_id, "scope": SCOPES})
-    echo("1) 打开 {}".format(device.get("verification_uri")))
-    echo("2) 输入代码 {}".format(device.get("user_code")))
-    echo("3) 用要写入日历的那个邮箱登录并同意（{} 秒内有效）".format(device.get("expires_in")))
+    code = device.get("user_code") or ""
+    # 老接口有时回 https://login.microsoft.com/device，那个入口在「组织+个人」应用上会路由错，
+    # 统一用现代的 devicelogin 页面。
+    page = "https://microsoft.com/devicelogin"
+    legacy = device.get("verification_uri") or ""
+    complete = device.get("verification_uri_complete") or ""
+    echo("=" * 52)
+    if complete:
+        echo("浏览器打开这个链接（码已带上）：")
+        echo("  " + complete)
+    else:
+        echo("浏览器打开：")
+        echo("  " + page)
+        echo("输入代码：")
+        echo("  " + code)
+    if legacy and "devicelogin" not in legacy:
+        echo("（接口另给了 {}，上面那个打不开时再试它）".format(legacy))
+    echo("用要写入日历的那个邮箱登录并同意，{} 秒内有效".format(device.get("expires_in")))
+    echo("=" * 52)
+    echo("等待授权中…")
 
     interval = int(device.get("interval", 5))
     deadline = time.time() + int(device.get("expires_in", 900))
@@ -156,17 +190,27 @@ def device_login(creds: Creds, echo=print) -> None:
                 },
             )
         except GraphError as exc:
-            message = str(exc)
-            if "authorization_pending" in message:
+            # 关键：微软把「还没输码」报成 AADSTS70016 + error=authorization_pending，
+            # 描述里没有 "authorization_pending" 这个词，只能靠 error 码判断。
+            code = getattr(exc, "code", "") or ""
+            if code == "authorization_pending" or "AADSTS70016" in str(exc):
                 continue
-            if "slow_down" in message:
+            if code == "slow_down" or "AADSTS70006" in str(exc):
                 interval += 5
                 continue
+            if code == "expired_token" or "AADSTS70020" in str(exc):
+                raise GraphError("设备代码过期了，重新跑一次 --graph-login")
+            if code == "authorization_declined" or "AADSTS70021" in str(exc):
+                raise GraphError("你在浏览器里拒绝了授权，重新跑一次 --graph-login")
             raise
         _store(creds, token)
+        access = token.get("access_token") or ""
+        if access and not _looks_like_jwt(access):
+            # 实测过：个人账户（MSA）拿到的是 EwB… 不透明票，Graph 照样接受，不是错误。
+            echo("提示：access_token 是不透明票（{} 字符），个人账户的常态，Graph 认这种票".format(len(access)))
         echo("登录成功，token 已存到 {}".format(creds.token_path))
         return
-    raise GraphError("设备代码过期了，重新跑一次")
+    raise GraphError("等满 {} 秒还没完成授权，重新跑一次".format(int(device.get("expires_in", 900))))
 
 
 def _store(creds: Creds, token: Dict) -> None:
@@ -182,13 +226,23 @@ def _store(creds: Creds, token: Dict) -> None:
     )
 
 
+def _looks_like_jwt(token: str) -> bool:
+    """只是描述形状，不能当「能不能用」的判断。
+
+    个人账户（MSA）的 access_token 是 EwB… 不透明票，不是 JWT，但 Graph 接受它；
+    组织账户才稳定是三段 JWT。所以这个函数只拿来做提示文案，别拿来拦截。
+    """
+    return bool(token) and token.count(".") == 2
+
+
 def access_token(creds: Optional[Creds] = None) -> str:
     creds = creds or load_creds()
     if creds is None:
         raise GraphError("没配 MAILER_GRAPH_CLIENT_ID，先看 README 注册 Azure 应用")
     cache = _read_cache(creds.token_path)
-    if cache.get("access_token") and cache.get("expires_at", 0) > time.time() + 120:
-        return cache["access_token"]
+    cached = cache.get("access_token") or ""
+    if cached and cache.get("expires_at", 0) > time.time() + 120:
+        return cached
     if not cache.get("refresh_token"):
         raise GraphError("还没有登录过：先跑 python scripts/send_digest.py --graph-login")
 
@@ -202,10 +256,44 @@ def access_token(creds: Optional[Creds] = None) -> str:
         },
     )
     _store(creds, token)
-    return token["access_token"]
+    fresh = token.get("access_token") or ""
+    if not fresh:
+        raise GraphError("刷新后没拿到 access_token，重新跑一次 --graph-login")
+    return fresh
 
 
 # ---------------------------------------------------------------- 日历
+
+
+def token_claims(creds: Optional[Creds] = None) -> Dict:
+    """解出缓存里 access_token 的声明（不验签，只看 aud/scp 这类字段）。"""
+    creds = creds or load_creds()
+    if creds is None:
+        return {}
+    token = _read_cache(creds.token_path).get("access_token") or ""
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def cache_info(creds: Optional[Creds] = None) -> Dict:
+    """缓存的 token 是什么状态（不返回 token 本身）。"""
+    creds = creds or load_creds()
+    if creds is None:
+        return {}
+    cache = _read_cache(creds.token_path)
+    return {
+        "path": str(creds.token_path),
+        "client_id": cache.get("client_id", ""),
+        "tenant": cache.get("tenant", ""),
+        "has_refresh": bool(cache.get("refresh_token")),
+        "left": int(cache.get("expires_at", 0) - time.time()),
+    }
 
 
 def whoami(creds: Optional[Creds] = None) -> Dict:

@@ -122,13 +122,34 @@ python scripts/send_digest.py --dry-run --apply-calendar
 | 报错 | 原因 | 回哪一步 |
 | --- | --- | --- |
 | `AADSTS50020`、「帐户在租户中不存在」 | 账户类型不是「组织 + 个人」 | 一 · 2 |
+| `AADSTS50019`、「租户中不存在该用户」 | 用了租户专属端点登个人账号 | 去掉 `MAILER_GRAPH_TENANT`，用 `common` |
 | `AADSTS700016`、「应用不存在」 | client ID 抄错，或抄成了对象 ID | 一 · 3 |
 | `AADSTS7000218`、「需要 client_assertion」 | 没开「允许公共客户端流」 | 一 · 4 |
 | `AADSTS65001`、「用户或管理员未同意」 | 权限没加，或浏览器里点了拒绝 | 一 · 5 / 二 |
+| `AADSTS90002`、「租户不存在」 | `MAILER_GRAPH_TENANT` 填的不是租户 ID | 见下节 |
 | 终端一直等，没有结果 | 浏览器那步没完成 | 二 |
 | `--graph-whoami` 显示别的账号 | 登录时登错号 | `--graph-logout` 后重来 |
 
-## 五、token 存在哪
+## 五、个人账户的 access_token 不是 JWT，这是正常的
+
+这条单独拎出来说，因为它坑过很久：
+
+| 账户类型 | access_token 长什么样 | 能不能调 Graph |
+| --- | --- | --- |
+| 组织账户（`@company.com`） | 三段 JWT，`eyJ…` | 能 |
+| 个人账户（`@outlook.com` 这类） | 常常是 `EwB…` 开头的**不透明长串**，一个点都没有 | **照样能** |
+
+判断一枚票能不能用，**唯一的标准是拿它调一次 `GET /me`**，返回 200 就是能用。别用「是不是
+JWT」做拦截——那会把个人账户的票全部误杀。
+
+顺带三条经验：
+
+- `id_token` 一定是 JWT，`aud` 是你的 client_id，可以离线验签；`access_token` 不讲这个规矩；
+- `EwB…` 票的 `refresh_token` 前缀形如 `M.C532_...`，是消费级账号服务的产物，正常；
+- 出现 `AADSTS90002`（租户不存在）几乎都是把「对象 ID」「应用程序 ID」当租户 ID 填了，
+  或者干脆不该设 `MAILER_GRAPH_TENANT`（默认 `common` 就对）。
+
+## 六、token 存在哪
 
 `<仓库>/downloads/.graph_token.json`，可以用 `MAILER_GRAPH_TOKEN` 改路径。内容是:
 
@@ -141,7 +162,7 @@ python scripts/send_digest.py --dry-run --apply-calendar
 - 换账号、换应用、被撤销授权：`python scripts/send_digest.py --graph-logout`，然后重新登录；
 - 在 QQ 邮箱的「已授权应用」里也能撤销，撤销后 token 立即失效。
 
-## 六、定时任务与换机器
+## 七、定时任务与换机器
 
 **cron 必须和登录时的系统用户一致**，否则读不到 `downloads/.graph_token.json`。用 root 的
 crontab 就跑在 root 下、文件也放在 root 能读到的地方。
@@ -151,7 +172,7 @@ crontab 就跑在 root 下、文件也放在 root 能读到的地方。
 1. 在新机器上重新 `--graph-login`（推荐，干净）；
 2. 把 `.graph_token.json` 拷过去、`chmod 600`（省一次登录，但等于搬运密码）。
 
-## 七、企业/学校账号
+## 八、企业/学校账号
 
 组织账号的权限可能需要管理员同意，这时 API 权限页会出现「代表 <租户> 授予管理员同意」按钮。
 个人账户不会出现，也不需要。

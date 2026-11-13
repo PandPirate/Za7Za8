@@ -61,7 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _graph_auth(args) -> int:
     """--graph-login / --graph-logout / --graph-whoami：设备代码登录，token 缓存在 downloads/.graph_token.json。"""
-    from .graph_calendar import GraphError, device_login, load_creds, whoami
+    from .graph_calendar import (
+        GraphError,
+        cache_info,
+        device_login,
+        load_creds,
+        token_claims,
+        whoami,
+    )
 
     creds = load_creds()
     if creds is None:
@@ -74,6 +81,26 @@ def _graph_auth(args) -> int:
             me = whoami(creds)
         except GraphError as exc:
             print("查询失败：{}".format(exc), file=sys.stderr)
+            info = cache_info(creds)
+            if info:
+                print(
+                    "token 缓存：{} | client_id={} | 租户={} | 剩余 {} 秒 | refresh={}".format(
+                        info["path"],
+                        (info["client_id"] or "?")[:8] + "…",
+                        info["tenant"] or "?",
+                        info["left"],
+                        "有" if info["has_refresh"] else "无",
+                    ),
+                    file=sys.stderr,
+                )
+            claims = token_claims(creds)
+            if claims:
+                print(
+                    "token 声明：aud={} | scp={} | iss={}".format(
+                        claims.get("aud") or "-", claims.get("scp") or "-", claims.get("iss") or "-"
+                    ),
+                    file=sys.stderr,
+                )
             return 1
         print("当前 token 属于：{}".format(me.get("displayName") or "?"))
         print("账号：{}".format(me.get("userPrincipalName") or me.get("mail") or "?"))
