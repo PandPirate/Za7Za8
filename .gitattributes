@@ -1,0 +1,4 @@
+# 行尾统一：仓库里一律 LF，Windows 上也不 checkout 成 CRLF。
+# 之前是混的——README.md / scripts/send_mail.py 是 CRLF，lib/** 是 LF；
+# 只要某个工具把文件重写成另一种行尾，git 就会显示整文件改动（遇到过 342 行假 diff）。
+* text=auto eol=lf

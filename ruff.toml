@@ -1,0 +1,6 @@
+# 本项目通篇用 str.format()，HTML 模板里还有大量 {{ }} 转义。
+# 换成 f-string 要逐个把 {{ 改回 {，改动大、易错、零收益，所以只关掉这一条。
+target-version = "py39"
+
+[lint]
+ignore = ["UP032"]
