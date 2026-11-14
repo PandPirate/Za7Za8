@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import email
 import email.policy
+import base64
 import hashlib
 import re
 import ssl
@@ -32,6 +33,92 @@ def _since_date(days: int) -> str:
     return "{} {}-{}".format(value.day, _MONTHS[value.month - 1], value.year)
 
 
+def _decode_utf7(name: str) -> str:
+    """IMAP 的 modified UTF-7 解码（中文文件夹名在协议里是 `&...-` 形式）。"""
+    out: List[str] = []
+    index = 0
+    while index < len(name):
+        char = name[index]
+        if char != "&":
+            out.append(char)
+            index += 1
+            continue
+        end = name.find("-", index)
+        if end == -1:
+            out.append(char)
+            index += 1
+            continue
+        chunk = name[index + 1 : end]
+        if not chunk:
+            out.append("&")
+        else:
+            try:
+                raw = base64.b64decode(chunk + "=" * (-len(chunk) % 4))
+                out.append(raw.decode("utf-16-be"))
+            except Exception:
+                out.append(name[index : end + 1])
+        index = end + 1
+    return "".join(out)
+
+
+def _encode_utf7(name: str) -> str:
+    """反过来：把人类可读的文件夹名编码成 modified UTF-7。"""
+    out: List[str] = []
+    buffered: List[str] = []
+
+    def flush() -> None:
+        if not buffered:
+            return
+        raw = "".join(buffered).encode("utf-16-be")
+        out.append("&" + base64.b64encode(raw).decode("ascii").rstrip("=") + "-")
+        buffered.clear()
+
+    for char in name:
+        if 0x20 <= ord(char) <= 0x7E:
+            flush()
+            out.append("&-" if char == "&" else char)
+        else:
+            buffered.append(char)
+    flush()
+    return "".join(out)
+
+
+def find_folder(conn, folder: str) -> str:
+    """把配置里的文件夹名换成 IMAP 认识的真实名字。
+
+    服务器返回的是 modified UTF-7（`&UXZO1mWHTvZZOQ-` 之类），用户只会写
+    `其他文件夹/21天习惯养成`；两边都接受，找不到就用编码后的名字试一次。
+    """
+    wanted = (folder or "INBOX").strip() or "INBOX"
+    if wanted.upper() == "INBOX":
+        return "INBOX"
+
+    status, data = conn.list()
+    names: List[str] = []
+    if status == "OK":
+        for raw in data or []:
+            line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+            match = re.search(r'"([^"]*)"\s*$', line)
+            if match:
+                names.append(match.group(1))
+
+    for name in names:
+        if name == wanted or _decode_utf7(name) == wanted:
+            return name
+    for name in names:
+        if _decode_utf7(name).endswith("/" + wanted):
+            return name
+    return _encode_utf7(wanted)
+
+
+def _mailbox(folder: str) -> str:
+    """IMAP 邮箱名：除 INBOX 外都加引号，避免空格 / 层级分隔符被拆开。"""
+    name = (folder or "INBOX").strip() or "INBOX"
+    if name.upper() == "INBOX":
+        return "INBOX"
+    return '"{}"'.format(name.replace("\\", "\\\\").replace('"', '\\"'))
+
+
 def connect(cfg: MailConfig):
     """建立 IMAP SSL 连接并登录。"""
     import imaplib
@@ -48,14 +135,14 @@ def connect(cfg: MailConfig):
 
 
 def search_recent(
-    conn, days: int = 3, limit: int = 50, subject: str = ""
+    conn, days: int = 3, limit: int = 50, subject: str = "", folder: str = "INBOX"
 ) -> List[bytes]:
     """返回最近几天的邮件 uid（新的在前，最多 limit 封）。
 
     给出 subject 时优先用 IMAP 的 SUBJECT 过滤（UTF-8）；服务器不支持就退回
-    SINCE 搜索，由调用方再按头部过滤。
+    SINCE 搜索，由调用方再按头部过滤。folder 写中文名也能识别，见 `find_folder`。
     """
-    conn.select("INBOX", readonly=False)
+    conn.select(_mailbox(find_folder(conn, folder)), readonly=False)
     since = _since_date(days)
     status, data = "BAD", []
     if subject:

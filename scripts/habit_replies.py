@@ -60,6 +60,8 @@ def main(argv=None) -> int:
                         help="扫描最近几天的邮件，默认 3")
     parser.add_argument("--limit", type=int, default=50, metavar="N",
                         help="最多检查多少封，默认 50")
+    parser.add_argument("--folder", metavar="NAME",
+                        help="IMAP 收信文件夹；不写则用配置 imap_folder，再兜底 INBOX")
     parser.add_argument("--dry-run", action="store_true",
                         help="只解析并打印，不写数据库、不发信、不标记已读")
     parser.add_argument("-v", "--verbose", action="store_true", help="打印调试日志")
@@ -102,6 +104,9 @@ def main(argv=None) -> int:
         return 2
 
     processed = 0
+    folder = args.folder or cfg.imap_folder or "INBOX"
+    if args.verbose:
+        print("收信文件夹：{}".format(folder))
     if not args.dry_run:
         # 过了零点再跑时，把前一天没回复的 pending 标成未完成
         closed = habit_tracker.close_overdue(
@@ -111,7 +116,7 @@ def main(argv=None) -> int:
             print("已把 {} 条超时未回复的打卡标为未完成".format(closed))
     try:
         for uid in inbox.search_recent(
-            conn, args.since_days, args.limit, habit_tracker.SUBJECT
+            conn, args.since_days, args.limit, habit_tracker.SUBJECT, folder
         ):
             header = inbox.fetch_headers(conn, uid)
             if header is None:

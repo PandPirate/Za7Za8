@@ -281,6 +281,11 @@ def _clean_lines(text: str) -> List[str]:
             continue
         if any(pattern.search(line) for pattern in _QUOTE_STOP):
             break
+        # 解码失败的字节（Outlook 引用块里的乱码）和 ___ 分隔线，都不是用户写的命令
+        if "\ufffd" in line:
+            continue
+        if re.fullmatch(r"[_\-=—–]{3,}", line):
+            continue
         # 模板占位符（<编号> / <原因>）和引用里的列表行不参与解析
         if "<" in line or ">" in line:
             continue

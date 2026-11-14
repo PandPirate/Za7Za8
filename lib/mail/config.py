@@ -13,6 +13,7 @@
     MAILER_BRAND       发件人显示名；不设则 From 只显示地址（摘要页面的标题用「摘要」兜底）
     MAILER_IMAP_HOST   IMAP 主机；不设时从 smtp.* 推导成 imap.*
     MAILER_IMAP_PORT   IMAP 端口，默认 993（SSL）
+    MAILER_IMAP_FOLDER 收信文件夹，默认 INBOX；写中文名也行（如 其他文件夹/21天习惯养成）
 
 密码建议只放环境变量，不要写进仓库里的 JSON。
 """
@@ -36,6 +37,7 @@ ENV_KEYS = {
     "brand": "MAILER_BRAND",
     "imap_host": "MAILER_IMAP_HOST",
     "imap_port": "MAILER_IMAP_PORT",
+    "imap_folder": "MAILER_IMAP_FOLDER",
 }
 
 
@@ -60,6 +62,7 @@ class MailConfig:
     brand: str = ""
     imap_host: str = ""
     imap_port: int = 993
+    imap_folder: str = "INBOX"
 
     @classmethod
     def load(cls, path: Optional[Path] = None, environ: Optional[Dict[str, str]] = None) -> "MailConfig":
