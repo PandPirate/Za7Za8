@@ -120,6 +120,12 @@ git config --get init.defaultBranch # master
 | `credential.helper` | 用什么程序保存账号密码/令牌。`manager` 指 Git Credential Manager（Windows 上常见） |
 | `init.defaultBranch` | `git init` 时新分支叫什么名字。这里是 `master`（GitHub 新建仓库默认是 `main`，两者不一致会带来后面第 6 节的麻烦） |
 
+> `git config <键>` 是 `--get` 的简写。本项目用它查了两个和换行有关的设置：
+> `git config core.autocrlf`（这里是 `false`，仓库里存什么换行就原样保留）、
+> `git config core.whitespace`（没设）。**没开 `cr-at-eol` 时，`git diff --check` 会把
+> CRLF 行尾的 `\r` 当成行尾空白报出来**——这在本仓库里是常态，不代表改动有问题，
+> 用脚本逐行 `rstrip()` 再查一遍才准。
+
 ### `git config --list --show-origin`
 
 列出所有配置，**并注明每条来自哪个文件**。本项目输出里能看到：
@@ -207,6 +213,17 @@ git diff --stat
 > 那不是文件坏了，而是**终端按 GBK 解码了 UTF-8 字节**。文件本身没问题——
 > 换用能正确处理 UTF-8 的方式（比如编辑器里打开）就能确认。
 
+只想要文件名或增删行数、不看内容时：
+
+```bash
+git diff --name-only     # 只列改动过的文件
+git diff --numstat       # 每行「新增行数 删除行数 文件名」
+```
+
+本项目用 `git diff --name-only` 拿改动文件清单逐个查行尾空白；用 `git diff --numstat`
+核对行尾换行符统一前后，改动行数有没有异常膨胀——`973 行变化` 看着像重写了整个文件，
+实际只是换行符被整体改写（CRLF ↔ LF），内容一个字没动。
+
 ### `git diff --cached`（含 `--stat`）
 
 `git diff` 看的是**工作区**；一旦 `git add` 过，改动就不在工作区那条线上了，得改用
@@ -236,11 +253,15 @@ git --no-pager diff --cached      # 看完整 diff
 ```bash
 git add -A            # 把这个仓库里所有改动都放进去（新增/修改/删除）
 git add AGENTS.md     # 只放这一个文件
+git add -A -n         # 演练：只说会加什么，不真加（= --dry-run）
 ```
 
 本项目的用法演变很说明问题：早期图省事用 `git add -A`，后来为了"**只提交该提交的东西**"
 改用 `git add <具体文件>`。当工作区同时有多个改动、而你只想提交其中一个时，
 这个区别就是生死攸关的——本项目就靠它把 `AGENTS.md` 单独拆出来提交。
+
+`-n`（`--dry-run`）是反悔成本最低的一步：重构后工作区总会有删除 + 新增 + 改名混在一起，
+先跑 `git add -A -n` 看一眼名单，能提早发现「误删的文件被当成改动」或「忘了加的目录」。
 
 ### `git commit -F -`
 
@@ -351,6 +372,20 @@ git --no-pager log --oneline --stat -3     # 最近 3 个提交 + 文件改动�
 
 > **习惯建议**：推送前跑一次 `git log --oneline --stat -<数量>`，一眼确认每个提交的内容和它的信息相符。
 
+### `git log -- <路径>`
+
+只看某个文件的历史。配 `--oneline -1` 就是「最后一次改动在哪个提交里」：
+
+```bash
+git log --oneline -1 -- scripts/msa_jwt.py
+```
+
+本项目用它确认 `scripts/msa_jwt.py` 是跟着 `4429da3`（个人账户 token 那次改动）一起进来的。
+（那个文件后来改名成 `scripts/graph_auth_check.py`，上面的路径是当时执行的原文。）
+
+> **坑**：`--` 不能省。不写时 git 会先把那个词当分支 / 版本号解释，路径不存在就直接报错；
+> 写了 `--`，后面才明确都是路径。
+
 ### `git log <A>..<B>`
 
 范围查询：列出"在 B 里、但不在 A 里"的提交。本项目用它查看待推送内容：
@@ -398,6 +433,21 @@ git show origin/master:scripts/pikpak_share_dl.py | grep -c aria2 # 期望 0
 
 这个写法解决了两个问题：一是"文件被 git 之外的程序改回去了"时的内容核对（见第 9 节），
 二是"远端版本里到底有什么"（本机没有远端的工作目录，但仍然能直接读远端提交里的文件）。
+
+### 读原始字节：`git cat-file blob <提交>:<路径>`
+
+`git show` 适合看文本；核对**换行符**（LF / CRLF）这种看不见的字符时，在 PowerShell 里
+接管道会经过文本解码，字节已经被改掉，得用 `git cat-file blob` 配合 Python 的
+`subprocess` 拿原始内容：
+
+```bash
+git cat-file blob HEAD:README.md     # 原样吐出文件内容，不经过 diff / 文本过滤器
+```
+
+想看字节构成就在 Python 里接住它的 stdout——`subprocess.run([...], capture_output=True).stdout`，
+再数 `b'\r\n'` 和 `b'\n'`。本项目用它确认过两件事：仓库里每个文件到底存的是 CRLF 还是 LF
+（本仓库是**混着来的**，不同文件不一样），以及某次编辑有没有把整个文件的换行符改掉——
+只看 `git show` 是查不出来的。
 
 ### 验证“内容真的没变”：`git rev-parse <提交>^{tree}`
 
@@ -802,7 +852,7 @@ git --no-optional-locks status      # 不要为了优化显示去写索引
 | 暂存 | `git add -A`、`git add <路径>` |
 | 提交（信息从标准输入读） | `printf '%s\n' "标题" "" "正文" \| GIT_EDITOR=true git commit -F -` |
 | 改最近一次提交 | `git commit --amend -F -` |
-| 看历史 | `git log --oneline`、`git log --stat`、`git log A..B` |
+| 看历史 | `git log --oneline`、`git log --stat`、`git log A..B`、`git log -- <路径>` |
 | 自定义历史输出 | `git log -1 --pretty=format:'%h %s'` |
 | 看某个提交 / 提交里的文件 | `git show <提交>`、`git show <提交>:<路径>` |
 | 验证两个提交内容是否一致 | `git rev-parse <提交A>^{tree} <提交B>^{tree}`（哈希相同即内容一致） |
