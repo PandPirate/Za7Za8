@@ -217,6 +217,29 @@ PLUGIN = MyPlugin()
 `CalendarEvent` 交给 `graph_calendar.sync()`。想定时发就挂 cron / 计划任务；
 写日历是幂等的（按 `subject + 开始时间` 去重），重复跑只更新不重复。
 
+### `scripts/send_mail.py`
+
+发一封**普通邮件**：任意标题 + 纯文本 / HTML + 附件。和摘要邮件分工不同：
+`send_digest.py` 是“插件出内容、框架排版”，这个只负责“把东西发出去”。
+
+```bash
+python scripts/send_mail.py --to a@b.com                      # 用默认标题/正文
+python scripts/send_mail.py --to a@b.com --subject 标题 --body "正文"
+python scripts/send_mail.py --to a@b.com --subject 周报 --body-file note.txt
+python scripts/send_mail.py --to a@b.com --subject 图文 --html page.html --attach 图.png
+python scripts/send_mail.py --to a@b.com --dry-run            # 只写 .eml/.html
+```
+
+- 不写 `--subject` / `--body` 时用默认值：「发信测试」/「来自 send_mail.py」——
+  这个脚本最常见的用途就是“先发一封测试信确认通道”。
+
+- SMTP 配置和 `send_digest.py` 共用：环境变量或 `--config state/mail.json`；
+  单独跑时普通邮件不套“每日摘要”那个显示名（`--brand` / `MAILER_BRAND` 可改）。
+- `--dry-run` 把邮件写成 `.eml` + `.html` 放到 `downloads/mail_preview/`，
+  能拖进 Outlook 先看一眼，不发信。
+- 附件按扩展名猜 MIME，猜不到就用 `application/octet-stream`；`--body` 与
+  `--body-file` 互斥，`-` 表示从标准输入读。
+
 ### `scripts/graph_auth_check.py`
 
 Graph 认证自检：设备代码流拿票 → 解码验签（纯标准库 RS256）→ 实调 `/me` 验证
@@ -234,6 +257,20 @@ python scripts/graph_auth_check.py --proxy http://127.0.0.1:7890      # 走代�
 判据只有一个：**Graph `/me` 返回 200**。个人账户（MSA）拿到的是 `EwB…` 开头的
 不透明票，不是 JWT，但照样能用——别拿「是不是 JWT」当判据。
 退出码：`0` = Graph 接受这枚票；`1` = 被拒；`2` = 参数 / 网络 / 授权问题。
+
+### `scripts/graph_calendar_test.py`
+
+写日历的自检：建测试日历 → 写 3 条事件 → 验证幂等 → 对比标题/时间 → 清理。
+
+```bash
+python scripts/graph_calendar_test.py --dry-run   # 只读演练：不往日历写事件
+python scripts/graph_calendar_test.py             # 真写一遍，跑完自动清理
+python scripts/graph_calendar_test.py --keep      # 写完保留，方便去 Outlook 里看
+```
+
+只动独立的「Za7Za8 测试」日历，事件标题一律 `[测试]` 开头，清理也只删这些。
+它能抓到“去重键不对导致重复建事件”这类问题——开发时就靠它发现 `sync_graph`
+把标题当成时间戳截断的 bug。
 
 ## 文档
 
