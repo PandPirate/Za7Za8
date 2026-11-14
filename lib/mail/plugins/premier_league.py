@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""英超插件：上一轮赛果、下一轮赛程和看点，并把赛程写进 Outlook 日历。
+"""英超插件：上一轮赛果、积分榜、下一轮赛程和看点，并把赛程写进 Outlook 日历。
 
-数据只来自 ESPN 的公开比分接口（eng.1 scoreboard）。取不到就返回 None，
+数据只来自 ESPN 的公开接口（eng.1 scoreboard / standings）。取不到就返回 None，
 这封邮件干脆不带英超区块——不拿旧比分充数。
 """
 
@@ -21,6 +21,7 @@ from ..core import Section
 SCOREBOARD = (
     "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates={day}"
 )
+STANDINGS = "https://site.api.espn.com/apis/v2/sports/soccer/eng.1/standings"
 CALENDAR_NAME = "英超赛程 2026-27"
 
 # ESPN 的英文队名 → 中文，没收录的原样保留
@@ -101,6 +102,29 @@ class Match:
 
     def label(self) -> str:
         return "{} vs {}".format(self.home, self.away)
+
+
+@dataclass
+class Standing:
+    """积分榜的一行。ESPN 的 pointsFor / pointsAgainst 指的是**进球数**，不是积分。"""
+
+    rank: int
+    team: str
+    played: int
+    won: int
+    drawn: int
+    lost: int
+    goals_for: int
+    goals_against: int
+    points: int
+
+    @property
+    def goal_diff(self) -> int:
+        return self.goals_for - self.goals_against
+
+    @property
+    def record(self) -> str:
+        return "{}-{}-{}".format(self.won, self.drawn, self.lost)
 
 
 # ---------------------------------------------------------------- 取数
@@ -226,7 +250,59 @@ def load_matches(ctx):
         return [], "无数据"
 
 
+def _stat(stats, name: str, default: int = 0) -> int:
+    """stats 是 [{name, value, ...}]，value 一律是 float（如 27.0），转成 int。"""
+    for item in stats:
+        if item.get("name") == name:
+            try:
+                return int(float(item.get("value")))
+            except (TypeError, ValueError):
+                return default
+    return default
+
+
+def parse_standings(payload) -> List[Standing]:
+    rows: List[Standing] = []
+    for child in payload.get("children") or []:
+        entries = (child.get("standings") or {}).get("entries") or []
+        for entry in entries:
+            stats = entry.get("stats") or []
+            if not stats:
+                continue
+            rows.append(
+                Standing(
+                    rank=_stat(stats, "rank"),
+                    team=_team_name(entry),
+                    played=_stat(stats, "gamesPlayed"),
+                    won=_stat(stats, "wins"),
+                    drawn=_stat(stats, "ties"),
+                    lost=_stat(stats, "losses"),
+                    # ESPN 的 pointsFor / pointsAgainst 是进球数，积分在 points
+                    goals_for=_stat(stats, "pointsFor"),
+                    goals_against=_stat(stats, "pointsAgainst"),
+                    points=_stat(stats, "points"),
+                )
+            )
+    rows.sort(key=lambda s: s.rank or 99)
+    return rows
+
+
+def load_standings(ctx) -> List[Standing]:
+    """积分榜；取不到就返回空列表，不拖累整封邮件。"""
+    try:
+        return parse_standings(ctx.http_json(STANDINGS))
+    except Exception as exc:
+        ctx.warn("积分榜拉取失败：{}".format(exc))
+        return []
+
+
 # ---------------------------------------------------------------- 排版
+
+
+def _pad(text: str, width: int) -> str:
+    """按显示宽度补空格：中文占两格，纯文本在等宽字体下才能对齐。"""
+    cells = sum(2 if ord(ch) > 0x2E7F else 1 for ch in text)
+    return text + " " * max(0, width - cells)
 
 
 def _label(text: str) -> str:
@@ -294,6 +370,42 @@ def _agenda(matches: List[Match]) -> str:
     )
 
 
+def _standings_table(rows: List[Standing]) -> str:
+    head = (
+        "<tr>"
+        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;"></td>'
+        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;">球队</td>'
+        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;text-align:center;">场</td>'
+        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;text-align:center;">'
+        "胜-平-负</td>"
+        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;text-align:right;">净胜</td>'
+        f'<td style="padding:0 0 4px;{_LINE}font-size:11px;color:#94a3b8;text-align:right;">积分</td>'
+        "</tr>"
+    )
+    body = []
+    for row in rows:
+        body.append(
+            "<tr>"
+            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:12px;color:#94a3b8;">'
+            f"{row.rank}</td>"
+            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:14px;color:#0f172a;">'
+            f"{escape(row.team)}</td>"
+            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:13px;color:#64748b;'
+            f'text-align:center;">{row.played}</td>'
+            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:13px;color:#64748b;'
+            f'text-align:center;white-space:nowrap;">{row.record}</td>'
+            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:13px;color:#64748b;'
+            f'text-align:right;">{row.goal_diff:+d}</td>'
+            f'<td style="padding:6px 0;{_LINE}font-size:14px;font-weight:700;'
+            f'color:#0f172a;text-align:right;">{row.points}</td>'
+            "</tr>"
+        )
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;">' + head + "".join(body) + "</table>"
+    )
+
+
 def _bullets(items: List[str]) -> str:
     lis = "".join(
         '<li style="margin:4px 0;color:#334155;">' + escape(item) + "</li>" for item in items
@@ -325,7 +437,7 @@ def _calendar_events(matches: List[Match], round_no: Optional[int]) -> List[Cale
 class PremierLeaguePlugin:
     name = "premier_league"
     title = "英超快报"
-    description = "英超上一轮赛果、下一轮赛程、看点，并把赛程写进 Outlook 日历"
+    description = "英超上一轮赛果、积分榜、下一轮赛程、看点，并把赛程写进 Outlook 日历"
     enabled_by_default = True
 
     def build(self, ctx) -> Optional[Section]:
@@ -354,6 +466,8 @@ class PremierLeaguePlugin:
         if not finished and not fixtures:
             return None
 
+        standings = load_standings(ctx)
+
         html: List[str] = []
         text: List[str] = []
 
@@ -365,6 +479,20 @@ class PremierLeaguePlugin:
                     m.when(), m.home, m.home_score, m.away_score, m.away
                 )
                 for m in finished
+            ]
+
+        if standings:
+            html += [_label("积分榜"), _standings_table(standings)]
+            text += ["", "积分榜"] + [
+                "{:>2}. {} {:>2}场 {:>5} {:>+3} {:>2}分".format(
+                    row.rank,
+                    _pad(row.team, 10),
+                    row.played,
+                    row.record,
+                    row.goal_diff,
+                    row.points,
+                )
+                for row in standings
             ]
 
         if fixtures:
