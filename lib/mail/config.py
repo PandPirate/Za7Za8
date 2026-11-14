@@ -11,6 +11,7 @@
     MAILER_FROM        发件人地址，默认同 USER
     MAILER_TO          收件人，多个用逗号或分号分隔
     MAILER_BRAND       发件人显示名；不设则 From 只显示地址（摘要页面的标题用「摘要」兜底）
+    MAILER_FROM_NAME   只覆盖发件人显示名；不设则跟着 brand 走
     MAILER_IMAP_HOST   IMAP 主机；不设时从 smtp.* 推导成 imap.*
     MAILER_IMAP_PORT   IMAP 端口，默认 993（SSL）
     MAILER_IMAP_FOLDER 收信文件夹，默认 INBOX；写中文名也行（如 其他文件夹/21天习惯养成）
@@ -35,6 +36,7 @@ ENV_KEYS = {
     "sender": "MAILER_FROM",
     "to": "MAILER_TO",
     "brand": "MAILER_BRAND",
+    "from_name": "MAILER_FROM_NAME",
     "imap_host": "MAILER_IMAP_HOST",
     "imap_port": "MAILER_IMAP_PORT",
     "imap_folder": "MAILER_IMAP_FOLDER",
@@ -60,6 +62,7 @@ class MailConfig:
     sender: str = ""
     to: List[str] = field(default_factory=list)
     brand: str = ""
+    from_name: str = ""
     imap_host: str = ""
     imap_port: int = 993
     imap_folder: str = "INBOX"
@@ -98,6 +101,10 @@ class MailConfig:
         # QQ / 163 / Gmail 的 IMAP 主机都是 imap.*；不认识的再手动配
         if not cfg.imap_host and cfg.host.startswith("smtp."):
             cfg.imap_host = "imap." + cfg.host[len("smtp."):]
+
+        # 发件人显示名默认跟 brand 一致；脚本里用 --brand 改页头时，From 不会跟着变
+        if not cfg.from_name:
+            cfg.from_name = cfg.brand
 
         if not cfg.sender and cfg.user:
             cfg.sender = cfg.user

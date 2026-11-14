@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--to", metavar="ADDR", help="收件人，多个用逗号分隔，覆盖配置")
     parser.add_argument("--subject", metavar="TEXT", help="覆盖自动生成的标题")
-    parser.add_argument("--brand", metavar="NAME", help="覆盖发件人显示名和邮件页头")
+    parser.add_argument("--brand", metavar="NAME", help="覆盖邮件页头（发件人显示名另由 from_name / 配置 brand 决定）")
     parser.add_argument(
         "--allow-empty",
         action="store_true",

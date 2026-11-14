@@ -181,7 +181,8 @@ def build_message(
     message = EmailMessage()
     message["Subject"] = subject or default_subject(sections, now)
     # 预览时可能还没配发件人，给个占位地址，别留出空尖括号
-    message["From"] = formataddr((cfg.brand, cfg.sender or "noreply@localhost"))
+    # 显示名优先用 from_name：习惯邮件要页头叫「21天习惯养成」、发件人叫 HPLINUX-Za7Za8
+    message["From"] = formataddr((cfg.from_name or cfg.brand, cfg.sender or "noreply@localhost"))
     if cfg.to:
         message["To"] = ", ".join(cfg.to)
     message["Date"] = format_datetime(now)

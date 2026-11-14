@@ -120,6 +120,8 @@ def main(argv=None) -> int:
         cfg.sender = args.sender
     if args.brand:
         cfg.brand = args.brand
+        # send_mail 的 --brand 是「改发件人名字」的直觉用法，两个都改
+        cfg.from_name = args.brand
     if args.to:
         cfg.to = split_addresses(args.to)
 

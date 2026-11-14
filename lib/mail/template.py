@@ -33,7 +33,9 @@ def render_text(sections: Sequence, now: datetime, brand: str) -> str:
         rule,
     ]
     for section in sections:
-        parts.append("[{}]".format(section.title))
+        # 区块标题和页头同名时不再重复（习惯邮件：页头就叫「21天习惯养成」）
+        if section.title.strip() != brand.strip():
+            parts.append("[{}]".format(section.title))
         parts.append(section.text.strip())
         parts.append("")
     return "\n".join(parts).strip() + "\n"
@@ -46,8 +48,10 @@ def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str
 
     blocks = []
     for section in sections:
-        blocks.append(
-            """
+        # 区块标题和页头同名时不再重复一遍
+        title_block = ""
+        if section.title.strip() != brand.strip():
+            title_block = """
       <tr>
         <td style="padding:24px 20px 6px 20px;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
@@ -58,14 +62,18 @@ def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str
             </tr>
           </table>
         </td>
-      </tr>
+      </tr>""".format(title=_escape(section.title))
+
+        blocks.append(
+            title_block
+            + """
       <tr>
-        <td style="padding:12px 20px 8px 20px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+        <td style="padding:{top} 20px 8px 20px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
                    font-size:15px;line-height:1.7;color:#1e293b;">
 {body}
         </td>
       </tr>""".format(
-                title=_escape(section.title), body=section.html.strip()
+                top="12px" if title_block else "20px", body=section.html.strip()
             )
         )
 
