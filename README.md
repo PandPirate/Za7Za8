@@ -157,12 +157,17 @@ python scripts/send_digest.py            # 真发
 python scripts/send_digest.py --config state/mail.json
 ```
 
-自带的两个插件：
+自带的三个插件：
 
 | 插件 | 说明 |
 | --- | --- |
 | `premier_league` | 英超上一轮赛果、积分榜、下一轮赛程、看点，并把赛程写进 Outlook 日历 |
+| `champions_league` | 欧冠近期赛果、联赛阶段积分榜、下一批赛程、看点，并把赛程写进 Outlook 日历 |
 | `example` | 插件契约示例，`--plugin example` 才跑 |
+
+`champions_league` 跟着欧冠赛程走：窗口内既没有刚结束的比赛、也没有即将开始的比赛时，
+整个区块不出现（不拿上赛季的数据凑数）。欧冠用独立的 `Automation/欧冠赛程 2026-27`
+日历，去重和迁移规则与英超相同。
 
 邮件里只有数据：赛果是比分，赛程是北京时间，看点是自动算出来的（进球大战、焦点战）；
 不带战报、集锦、附件。取不到实时数据时这一块整体不出现，不拿旧比分凑数。
@@ -239,6 +244,9 @@ python scripts/send_premier_league.py --dry-run --apply-calendar   # 预览的�
 `--graph-login`、`--config` 这些也都能直接传给它。SMTP 与 Graph 的首次配置见上一节。
 写日历是幂等的：按 `subject + 开始时间` 去重，重复跑只更新，日历里已有的同键副本
 会被清理，只用一条。
+
+欧冠没有单独入口，用 `python scripts/send_digest.py --plugin champions_league` 即可；
+不加 `--plugin` 时两个插件都会跑，欧冠没比赛会自动跳过。
 
 ### `scripts/send_mail.py`
 
