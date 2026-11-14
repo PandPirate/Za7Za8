@@ -248,6 +248,26 @@ python scripts/send_premier_league.py --dry-run --apply-calendar   # 预览的�
 欧冠没有单独入口，用 `python scripts/send_digest.py --plugin champions_league` 即可；
 不加 `--plugin` 时两个插件都会跑，欧冠没比赛会自动跳过。
 
+### `scripts/send_leagues.sh`
+
+一条命令发两封独立邮件：英超、欧冠。脚本先设置 `MAILER_GRAPH_CLIENT_ID`，收件人写死为
+`glycyrrhizin@outlook.com`，并自动带上 `state/mail.json` 的 SMTP 配置，然后分别调用：
+
+```bash
+python scripts/send_digest.py --plugin premier_league --calendar graph --to glycyrrhizin@outlook.com
+python scripts/send_digest.py --plugin champions_league --calendar graph --to glycyrrhizin@outlook.com
+```
+
+日常不需要传参：
+
+```bash
+bash scripts/send_leagues.sh --dry-run     # 两个预览文件，不发信
+bash scripts/send_leagues.sh               # 真发两封 + 写两个日历
+```
+
+临时换人仍可加 `--to someone@example.com` 覆盖。英超或欧冠休赛期没有比赛时，对应的那封会
+自动跳过（`--allow-empty`），不报错。适合挂 cron，每周五 18:00 跑一次即可。
+
 ### `scripts/send_mail.py`
 
 发一封**普通邮件**：任意标题 + 纯文本 / HTML + 附件。和摘要邮件分工不同：

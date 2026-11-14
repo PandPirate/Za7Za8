@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--to", metavar="ADDR", help="收件人，多个用逗号分隔，覆盖配置")
     parser.add_argument("--subject", metavar="TEXT", help="覆盖自动生成的标题")
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="没有内容时返回 0（休赛期 / 定时任务用）",
+    )
     parser.add_argument("--config", type=Path, metavar="JSON", help="SMTP 配置文件")
     parser.add_argument("--out", type=Path, metavar="DIR", help="预览输出目录")
     parser.add_argument(
@@ -180,6 +185,9 @@ def main(argv=None) -> int:
         )
     sections = collect(ctx, chosen)
     if not sections:
+        if args.allow_empty:
+            print("没有内容，已跳过")
+            return 0
         print("插件都没有产出内容，不生成邮件", file=sys.stderr)
         return 1
 
@@ -188,6 +196,9 @@ def main(argv=None) -> int:
     if args.dry_run:
         outdir = args.out or PREVIEW_DIR
         stem = "digest-{:%Y%m%d}".format(ctx.now)
+        # 只跑一个插件时把名字写进文件名，避免先后两次预览互相覆盖
+        if len(chosen) == 1:
+            stem += "-" + chosen[0].name
         eml, page = save_preview(message, outdir, stem)
         print("标题：{}".format(message["Subject"]))
         print("区块：{}".format("、".join("{}({})".format(s.title, s.key) for s in sections)))
