@@ -157,12 +157,13 @@ python scripts/send_digest.py            # 真发
 python scripts/send_digest.py --config state/mail.json
 ```
 
-自带的三个插件：
+自带的四个插件：
 
 | 插件 | 说明 |
 | --- | --- |
 | `premier_league` | 英超上一轮赛果、积分榜、下一轮赛程、看点，并把赛程写进 Outlook 日历 |
 | `champions_league` | 欧冠近期赛果、联赛阶段积分榜、下一批赛程、看点，并把赛程写进 Outlook 日历 |
+| `habit` | 21 天习惯养成：今日待办，回复邮件完成/说明原因；`--plugin habit` 才跑 |
 | `example` | 插件契约示例，`--plugin example` 才跑 |
 
 `champions_league` 跟着欧冠赛程走：窗口内既没有刚结束的比赛、也没有即将开始的比赛时，
@@ -267,6 +268,62 @@ bash scripts/send_leagues.sh               # 真发两封 + 写两个日历
 
 临时换人仍可加 `--to someone@example.com` 覆盖。英超或欧冠休赛期没有比赛时，对应的那封会
 自动跳过（`--allow-empty`），不报错。适合挂 cron，每周五 18:00 跑一次即可。
+
+### `scripts/send_habits.py` 与 `scripts/habit_replies.py`
+
+习惯打卡走“每日一封 + 邮件回复”的闭环。邮件主题固定为
+`21天习惯养成 · 2026-11-14`；回信查询时用主题关键词 `21天习惯养成` 过滤。
+
+- `send_habits.py`：每天发一封「今日待办」。**同一天只发一封新邮件**，重复运行会跳过；
+  发出去之后，当天的回复都在这一封里。
+- `habit_replies.py`：从 IMAP 收件箱读回复，解析后写入 `state/habits.db`，再回一封
+  「所有待办 + 本次变更」的摘要，保持在同一个邮件线程里。
+
+收件人默认写死为 `glycyrrhizin@outlook.com`；`send_habits.py` 负责“一天只发一封”，
+直接跑 `send_digest.py --plugin habit` 不会做当天去重。数据库只存待办、打卡状态和已处理
+的 `Message-ID`，**不保存邮件原文**。回信只处理发件人等于配置收件人的邮件。
+
+```bash
+python scripts/send_habits.py --dry-run     # 预览，不发送、不占当天名额
+python scripts/send_habits.py               # 真发；今天发过就跳过
+python scripts/habit_replies.py --dry-run   # 只解析最近回复，不写库不发信
+python scripts/habit_replies.py             # 处理最近 3 天的回复
+```
+
+每日邮件示例（回复时只改数字/补原因，保留关键词）：
+
+```text
+1. 阅读 30 分钟
+2. 运动 20 分钟
+3. 早睡
+
+完成 <编号>
+未完成 <编号> <原因>
+新增 <每日待办>
+删除 <编号>
+```
+
+`未完成` 必须带原因，否则不会记录，并会在摘要里要求补原因；没提到的待办会继续显示为
+「未回复」。新增的待办是**每天重复**的习惯；删除后不再出现在之后的邮件里。同一天多次
+回复只更新同一份记录，`新增` 同一名称不会产生第二条待办。
+
+每日邮件和回信摘要会为每个习惯显示统计：**自 2026-11-01 开始 · 共完成 12 次 · 连续 3 天**。
+
+**IMAP 配置**：回复读的是 SMTP 发件箱的收件箱（QQ / 163 / Gmail 都可以）。QQ 邮箱需要
+在设置里开启 IMAP，密码填授权码；`imap_host` 不写时会从 `smtp.qq.com` 推导成
+`imap.qq.com`，端口默认 993。查询优先用 IMAP 服务端的 `SUBJECT "21天习惯养成"` 过滤，
+服务器不支持时退回 `SINCE` + 本地头部过滤。数据库在 `state/habits.db`（已 gitignore），
+可用 `MAILER_HABIT_DB` 改路径。
+
+适合挂 cron：
+
+```cron
+# 每天 07:00 发今日待办
+0 7 * * * cd /home/pirate/work/Za7Za8 && python3 scripts/send_habits.py >> state/habit.log 2>&1
+
+# 06:00-23:00 每 15 分钟收一次回复（单次约 1.4 秒；10 分钟也不会压垮服务器）
+*/15 6-23 * * * cd /home/pirate/work/Za7Za8 && python3 scripts/habit_replies.py >> state/habit.log 2>&1
+```
 
 ### `scripts/send_mail.py`
 

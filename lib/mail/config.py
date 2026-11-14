@@ -11,6 +11,8 @@
     MAILER_FROM        发件人地址，默认同 USER
     MAILER_TO          收件人，多个用逗号或分号分隔
     MAILER_BRAND       发件人显示名；不设则 From 只显示地址（摘要页面的标题用「摘要」兜底）
+    MAILER_IMAP_HOST   IMAP 主机；不设时从 smtp.* 推导成 imap.*
+    MAILER_IMAP_PORT   IMAP 端口，默认 993（SSL）
 
 密码建议只放环境变量，不要写进仓库里的 JSON。
 """
@@ -32,6 +34,8 @@ ENV_KEYS = {
     "sender": "MAILER_FROM",
     "to": "MAILER_TO",
     "brand": "MAILER_BRAND",
+    "imap_host": "MAILER_IMAP_HOST",
+    "imap_port": "MAILER_IMAP_PORT",
 }
 
 
@@ -54,6 +58,8 @@ class MailConfig:
     sender: str = ""
     to: List[str] = field(default_factory=list)
     brand: str = ""
+    imap_host: str = ""
+    imap_port: int = 993
 
     @classmethod
     def load(cls, path: Optional[Path] = None, environ: Optional[Dict[str, str]] = None) -> "MailConfig":
@@ -65,9 +71,9 @@ class MailConfig:
                 continue
             if field_name == "to":
                 cfg.to = split_addresses(raw)
-            elif field_name == "port":
+            elif field_name in ("port", "imap_port"):
                 try:
-                    cfg.port = int(raw)
+                    setattr(cfg, field_name, int(raw))
                 except ValueError:
                     raise SystemExit("{} 不是合法端口：{}".format(env_name, raw))
             else:
@@ -81,10 +87,14 @@ class MailConfig:
                     continue
                 if field_name == "to":
                     cfg.to = split_addresses(value) if isinstance(value, str) else list(value)
-                elif field_name == "port":
-                    cfg.port = int(value)
+                elif field_name in ("port", "imap_port"):
+                    setattr(cfg, field_name, int(value))
                 else:
                     setattr(cfg, field_name, value)
+
+        # QQ / 163 / Gmail 的 IMAP 主机都是 imap.*；不认识的再手动配
+        if not cfg.imap_host and cfg.host.startswith("smtp."):
+            cfg.imap_host = "imap." + cfg.host[len("smtp."):]
 
         if not cfg.sender and cfg.user:
             cfg.sender = cfg.user
