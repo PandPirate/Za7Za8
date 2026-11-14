@@ -10,7 +10,7 @@
     MAILER_SMTP_PASS   密码 / 授权码
     MAILER_FROM        发件人地址，默认同 USER
     MAILER_TO          收件人，多个用逗号或分号分隔
-    MAILER_BRAND       发件人显示名，默认「每日摘要」
+    MAILER_BRAND       发件人显示名；不设则 From 只显示地址（摘要页面的标题用「摘要」兜底）
 
 密码建议只放环境变量，不要写进仓库里的 JSON。
 """
@@ -53,7 +53,7 @@ class MailConfig:
     password: str = ""
     sender: str = ""
     to: List[str] = field(default_factory=list)
-    brand: str = "每日摘要"
+    brand: str = ""
 
     @classmethod
     def load(cls, path: Optional[Path] = None, environ: Optional[Dict[str, str]] = None) -> "MailConfig":

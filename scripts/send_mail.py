@@ -17,7 +17,6 @@ SMTP 配置和 `send_digest.py` 共用：环境变量（MAILER_SMTP_*）或 `--c
 
 import argparse
 import mimetypes
-import os
 import smtplib
 import sys
 from datetime import datetime
@@ -121,8 +120,6 @@ def main(argv=None) -> int:
         cfg.sender = args.sender
     if args.brand:
         cfg.brand = args.brand
-    elif "MAILER_BRAND" not in os.environ:
-        cfg.brand = ""      # 摘要的默认显示名是「每日摘要」，普通邮件不该套这个
     if args.to:
         cfg.to = split_addresses(args.to)
 

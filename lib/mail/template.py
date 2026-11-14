@@ -12,12 +12,18 @@ from typing import Sequence
 
 WEEKDAY_CN = "一二三四五六日"
 
+# 邮件版面的标题兜底：`MailConfig.brand` 默认是空（From 只显示地址 / 测试邮件不需要名字），
+# 但摘要邮件的 `<title>` 和页头不能真为空，所以在这里指定一个。想换就用
+# `MAILER_BRAND` 或 `--brand` 覆盖。
+DEFAULT_BRAND = "摘要"
+
 
 def weekday(day: datetime) -> str:
     return "周" + WEEKDAY_CN[day.weekday()]
 
 
 def render_text(sections: Sequence, now: datetime, brand: str) -> str:
+    brand = brand or DEFAULT_BRAND
     rule = "─" * 46
     parts = [
         brand,
@@ -37,6 +43,7 @@ def render_text(sections: Sequence, now: datetime, brand: str) -> str:
 
 def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str, str]":
     """返回 (html, text)。"""
+    brand = brand or DEFAULT_BRAND
     subtitle = "{}年{}月{}日 · {}".format(now.year, now.month, now.day, weekday(now))
 
     blocks = []
