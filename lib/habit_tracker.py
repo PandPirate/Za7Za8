@@ -62,6 +62,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS habits_title ON habits(title);
 """
 
 _NUM_RE = re.compile(r"\d+")
+# 行首的编号列表：`1`、`1 2`、`1,2`、`1、2`；后面的文字不算编号
+_NUM_LIST_RE = re.compile(r"^([\d\s,，、]+)")
 _QUOTE_STOP = (
     re.compile(r"^-{2,}\s*(Original Message|原始邮件)", re.I),
     re.compile(r"^On\s.+wrote:\s*$", re.I),
@@ -267,6 +269,12 @@ def _numbers(text: str) -> List[int]:
     return sorted({int(value) for value in _NUM_RE.findall(text)})
 
 
+def _leading_numbers(text: str) -> List[int]:
+    """只取行首连续的编号，避免把原因里的数字（`P 1 跑了 5 公里`）当成编号。"""
+    match = _NUM_LIST_RE.match(text or "")
+    return _numbers(match.group(1)) if match else []
+
+
 def _reason(text: str) -> str:
     text = text.strip()
     text = re.sub(r"^(原因|因为|理由)\s*[:：]?\s*", "", text)
@@ -289,7 +297,7 @@ def _clean_lines(text: str) -> List[str]:
         # 模板占位符（<编号> / <原因>）和引用里的列表行不参与解析
         if "<" in line or ">" in line:
             continue
-        if re.match(r"^\d+[.、)]\s*", line):
+        if re.match(r"^\d", line):
             continue
         lines.append(line)
     return lines
@@ -307,10 +315,10 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
             continue
 
         match = re.match(
-            r"^(?:PASS|P|DONE|完成|打卡)\s*[:：]?\s*(.+)$", line, re.I
+            r"^(?:PASS|P|DONE|完成|打卡)\s*[:：]?\s*(.*)$", line, re.I
         )
         if match:
-            numbers = _numbers(match.group(1))
+            numbers = _leading_numbers(match.group(1))
             if numbers:
                 commands.append(Command("done", numbers=numbers, line=line))
             else:
@@ -318,16 +326,16 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
             continue
 
         match = re.match(
-            r"^(?:FAIL|F|未完成|没完成)\s*[:：]?\s*(.+)$", line, re.I
+            r"^(?:FAIL|F|未完成|没完成)\s*[:：]?\s*(.*)$", line, re.I
         )
         if match:
             rest = match.group(1)
-            number_match = re.match(r"^([\d\s,，、]+)\s*(.*)$", rest)
+            number_match = _NUM_LIST_RE.match(rest)
             if not number_match:
                 errors.append("「{}」没写编号".format(line))
                 continue
             numbers = _numbers(number_match.group(1))
-            reason = _reason(number_match.group(2))
+            reason = _reason(rest[number_match.end() :])
             if not numbers:
                 errors.append("「{}」没写编号".format(line))
             elif not reason:
@@ -343,17 +351,17 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
             continue
 
         match = re.match(
-            r"^(?:DELETE|DEL|D|删除)\s*[:：]?\s*(.+)$", line, re.I
+            r"^(?:DELETE|DEL|D|删除)\s*[:：]?\s*(.*)$", line, re.I
         )
         if match:
-            numbers = _numbers(match.group(1))
+            numbers = _leading_numbers(match.group(1))
             if numbers:
                 commands.append(Command("delete", numbers=numbers, line=line))
             else:
                 errors.append("「{}」没写编号".format(line))
             continue
 
-        match = re.match(r"^(?:ADD|A|新增|添加)\s*[:：]?\s*(.+)$", line, re.I)
+        match = re.match(r"^(?:ADD|A|新增|添加)\s*[:：]?\s*(.*)$", line, re.I)
         if match:
             # 一行一个待办；分号前是名称，分号后是目标（可省略）
             title, _, goal = match.group(1).partition(";")

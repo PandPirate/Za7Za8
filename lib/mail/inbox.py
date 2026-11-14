@@ -7,9 +7,9 @@ IMAP 主机（smtp.qq.com → imap.qq.com），也可以在配置里写 imap_hos
 
 from __future__ import annotations
 
+import base64
 import email
 import email.policy
-import base64
 import hashlib
 import re
 import ssl
@@ -142,7 +142,9 @@ def search_recent(
     给出 subject 时优先用 IMAP 的 SUBJECT 过滤（UTF-8）；服务器不支持就退回
     SINCE 搜索，由调用方再按头部过滤。folder 写中文名也能识别，见 `find_folder`。
     """
-    conn.select(_mailbox(find_folder(conn, folder)), readonly=False)
+    status, _ = conn.select(_mailbox(find_folder(conn, folder)), readonly=False)
+    if status != "OK":
+        raise RuntimeError("找不到 IMAP 文件夹：{}".format(folder))
     since = _since_date(days)
     status, data = "BAD", []
     if subject:

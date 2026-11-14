@@ -278,6 +278,24 @@ git --no-pager diff --cached      # 看完整 diff
 > 也就是 `git add` 做过的事。所以「工作区 vs 暂存区」用 `git diff`，
 > 「暂存区 vs 最后一次提交」用 `git diff --cached`。
 
+### `git diff <提交> -- <路径>`
+
+想回看「某次提交到底改了什么」，可以把那个提交拿来比：
+
+```bash
+git --no-pager diff HEAD~1 -- lib/mail/inbox.py scripts/habit_replies.py
+git --no-pager diff HEAD~1 HEAD -- lib/mail/inbox.py   # 只看两个提交之间
+```
+
+本项目用它做**提交后自查**：先 `git show --stat HEAD` 看文件清单，再按模块拆开看
+具体 diff（文件夹解析 / 回信脚本 / 解析器），比一次性看整份改动更容易发现「顺手
+改坏了别的东西」。
+
+> **坑**：`git diff <提交>` 比的是**那个提交 vs 工作区**，不是 vs HEAD。工作区如果
+> 之后又改过，那些改动也会算进去；只想看历史就用 `git diff A B` 或 `git show`。
+> 另外这个仓库里 `git diff` 的中文常显示成 `缁欏湪` 这种乱码，那是终端按 GBK 解码
+> UTF-8 字节，文件本身没问题（用编辑器或 `git show` 的 UTF-8 输出确认）。
+
 ---
 
 ## 3. 暂存与提交

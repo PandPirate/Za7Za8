@@ -294,6 +294,7 @@ python scripts/send_habits.py --dry-run     # 预览，不发送、不占当天�
 python scripts/send_habits.py               # 真发；今天发过就跳过
 python scripts/habit_replies.py --dry-run   # 只解析最近回复，不写库不发信
 python scripts/habit_replies.py             # 处理最近 3 天的回复
+python scripts/habit_replies.py --folder "其他文件夹/21天习惯养成"   # 临时指定收信文件夹
 ```
 
 每日邮件示例（回复时只改数字/补原因，保留首字母）：

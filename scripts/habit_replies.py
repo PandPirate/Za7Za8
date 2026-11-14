@@ -115,9 +115,18 @@ def main(argv=None) -> int:
         if closed:
             print("已把 {} 条超时未回复的打卡标为未完成".format(closed))
     try:
-        for uid in inbox.search_recent(
-            conn, args.since_days, args.limit, habit_tracker.SUBJECT, folder
-        ):
+        try:
+            uids = inbox.search_recent(
+                conn, args.since_days, args.limit, habit_tracker.SUBJECT, folder
+            )
+        except RuntimeError as exc:
+            print("读取文件夹 {} 失败：{}".format(folder, exc), file=sys.stderr)
+            print(
+                "检查 imap_folder / --folder：要写 IMAP 里的真实层级，如 其他文件夹/21天习惯养成",
+                file=sys.stderr,
+            )
+            return 2
+        for uid in uids:
             header = inbox.fetch_headers(conn, uid)
             if header is None:
                 continue
