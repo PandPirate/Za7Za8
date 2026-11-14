@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """习惯打卡：SQLite 存储、回复解析、邮件排版。
 
-编号只在「某一天的快照」里有效：邮件里显示 1..N，用户回复时按同一份快照解析。
+编号就是 `habits.id`：全局唯一、永不复用。删掉中间一个，邮件里就会出现 1、3、4，
+不会重新编号，这样回复和统计都不会错位。
+
+每个待办可以带一个「目标」（`阅读;20分钟`），存在 `habits.goal` 里；每天建打卡时
+把它快照进 `checkins.goal`，以后改目标不会改写历史。邮件只展示最新目标，统计（共完成
+次数、连续天数）按编号跨目标累计。
+
 数据库默认在 `state/habits.db`（已 gitignore），可用 MAILER_HABIT_DB 覆盖。
 """
 
@@ -30,12 +36,14 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS habits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
+    goal TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS checkins (
     day TEXT NOT NULL,
     habit_id INTEGER NOT NULL,
+    goal TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     reason TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
@@ -75,9 +83,10 @@ _STATUS_MARKS = ("✅", "❌", "➕", "🗑", "ℹ", "⚠", "⏳")
 
 @dataclass
 class HabitRow:
-    number: int
+    number: int          # = habits.id，稳定编号，全局唯一且不复用
     habit_id: int
     title: str
+    goal: str            # 最新目标，空串表示没设
     created_at: str
     total_done: int
     status: str          # pending / done / missed
@@ -91,6 +100,7 @@ class Command:
     numbers: List[int] = field(default_factory=list)
     reason: str = ""
     title: str = ""
+    goal: str = ""
     line: str = ""
 
 
@@ -109,6 +119,19 @@ def _now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """老库升级：`CREATE TABLE IF NOT EXISTS` 不会补新列，这里手动加 goal。"""
+    for table in ("habits", "checkins"):
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info({})".format(table))
+        }
+        if "goal" not in columns:
+            conn.execute(
+                "ALTER TABLE {} ADD COLUMN goal TEXT NOT NULL DEFAULT ''".format(table)
+            )
+
+
 @contextmanager
 def _db(path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     db_path = Path(path) if path else DB_PATH
@@ -116,6 +139,7 @@ def _db(path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     try:
         yield conn
         conn.commit()
@@ -146,7 +170,7 @@ def _streak(conn: sqlite3.Connection, habit_id: int, day: str) -> int:
 
 def _rows(conn: sqlite3.Connection, day: str) -> List[HabitRow]:
     rows = conn.execute(
-        "SELECT c.habit_id, h.title, h.created_at, c.status, c.reason, "
+        "SELECT c.habit_id, h.title, h.goal, h.created_at, c.status, c.reason, "
         "(SELECT COUNT(*) FROM checkins t "
         " WHERE t.habit_id = c.habit_id AND t.status = 'done') AS total_done "
         "FROM checkins c JOIN habits h ON h.id = c.habit_id "
@@ -155,34 +179,38 @@ def _rows(conn: sqlite3.Connection, day: str) -> List[HabitRow]:
     ).fetchall()
     return [
         HabitRow(
-            number=index + 1,
-            habit_id=row["habit_id"],
+            number=int(row["habit_id"]),
+            habit_id=int(row["habit_id"]),
             title=row["title"],
+            goal=str(row["goal"] or ""),
             created_at=row["created_at"],
             total_done=int(row["total_done"]),
             status=row["status"],
             reason=row["reason"],
             streak=_streak(conn, row["habit_id"], day),
         )
-        for index, row in enumerate(rows)
+        for row in rows
     ]
 
 
 def ensure_day(day: str, db_path: Optional[Path] = None) -> List[HabitRow]:
-    """给当天所有启用的习惯补一条 pending，返回当天快照。"""
+    """给当天所有启用的习惯补一条 pending，返回当天快照。
+
+    补的时候顺手把**当天的目标**存进 checkins，以后改了目标也不会改掉历史。
+    """
     with _db(db_path) as conn:
         now = _now()
         existing = {
             row["habit_id"]
             for row in conn.execute("SELECT habit_id FROM checkins WHERE day = ?", (day,))
         }
-        for row in conn.execute("SELECT id FROM habits WHERE active = 1 ORDER BY id"):
+        for row in conn.execute("SELECT id, goal FROM habits WHERE active = 1 ORDER BY id"):
             if row["id"] in existing:
                 continue
             conn.execute(
-                "INSERT INTO checkins(day, habit_id, status, reason, updated_at) "
-                "VALUES(?, ?, 'pending', '', ?)",
-                (day, row["id"], now),
+                "INSERT INTO checkins(day, habit_id, goal, status, reason, updated_at) "
+                "VALUES(?, ?, ?, 'pending', '', ?)",
+                (day, row["id"], str(row["goal"] or ""), now),
             )
         return _rows(conn, day)
 
@@ -212,19 +240,25 @@ def close_overdue(
         return int(cur.rowcount or 0)
 
 
-def add_habit(title: str, day: str, db_path: Optional[Path] = None) -> int:
+def add_habit(
+    title: str,
+    day: str,
+    db_path: Optional[Path] = None,
+    goal: str = "",
+) -> int:
     """测试 / 初始化用：新增一个习惯，并给当天补 pending。"""
     with _db(db_path) as conn:
         now = _now()
+        goal = goal.strip()
         cur = conn.execute(
-            "INSERT INTO habits(title, active, created_at) VALUES(?, 1, ?)",
-            (title.strip(), now),
+            "INSERT INTO habits(title, goal, active, created_at) VALUES(?, ?, 1, ?)",
+            (title.strip(), goal, now),
         )
         habit_id = int(cur.lastrowid or 0)
         conn.execute(
-            "INSERT OR IGNORE INTO checkins(day, habit_id, status, reason, updated_at) "
-            "VALUES(?, ?, 'pending', '', ?)",
-            (day, habit_id, now),
+            "INSERT OR IGNORE INTO checkins(day, habit_id, goal, status, reason, updated_at) "
+            "VALUES(?, ?, ?, 'pending', '', ?)",
+            (day, habit_id, goal, now),
         )
         return habit_id
 
@@ -316,14 +350,12 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
 
         match = re.match(r"^(?:ADD|A|新增|添加)\s*[:：]?\s*(.+)$", line, re.I)
         if match:
-            titles = [
-                part.strip()
-                for part in re.split(r"[;；,，]", match.group(1))
-                if part.strip()
-            ]
-            if titles:
-                for title in titles:
-                    commands.append(Command("add", title=title, line=line))
+            # 一行一个待办；分号前是名称，分号后是目标（可省略）
+            title, _, goal = match.group(1).partition(";")
+            title = title.strip()
+            goal = goal.strip()
+            if title:
+                commands.append(Command("add", title=title, goal=goal, line=line))
             else:
                 errors.append("「{}」没写待办名称".format(line))
             continue
@@ -342,7 +374,7 @@ def apply_reply(day: str, text: str, db_path: Optional[Path] = None) -> ReplyRes
             "WHERE c.day = ? AND h.active = 1 ORDER BY h.id",
             (day,),
         ).fetchall()
-        by_number = {index + 1: row for index, row in enumerate(rows)}
+        by_number = {int(row["habit_id"]): row for row in rows}
         now = _now()
 
         for command in commands:
@@ -358,33 +390,51 @@ def apply_reply(day: str, text: str, db_path: Optional[Path] = None) -> ReplyRes
 
             if command.action == "add":
                 existing = conn.execute(
-                    "SELECT id, active FROM habits WHERE title = ?",
+                    "SELECT id, active, goal FROM habits WHERE title = ?",
                     (command.title,),
                 ).fetchone()
-                if existing is not None and existing["active"]:
-                    result.notes.append("已存在：{}".format(command.title))
-                    continue
                 if existing is not None:
                     habit_id = int(existing["id"])
-                    conn.execute("UPDATE habits SET active=1 WHERE id=?", (habit_id,))
-                    result.notes.append("恢复：{}".format(command.title))
+                    old_goal = str(existing["goal"] or "")
+                    if not existing["active"]:
+                        conn.execute("UPDATE habits SET active=1 WHERE id=?", (habit_id,))
+                        result.notes.append("恢复：{}".format(command.title))
+                    if command.goal and command.goal != old_goal:
+                        conn.execute(
+                            "UPDATE habits SET goal=? WHERE id=?", (command.goal, habit_id)
+                        )
+                        result.notes.append(
+                            "目标更新：{}（{} → {}）".format(
+                                command.title, old_goal or "无", command.goal
+                            )
+                        )
+                    elif existing["active"]:
+                        result.notes.append("已存在：{}".format(command.title))
                 else:
                     cur = conn.execute(
-                        "INSERT INTO habits(title, active, created_at) VALUES(?, 1, ?)",
-                        (command.title, now),
+                        "INSERT INTO habits(title, goal, active, created_at) "
+                        "VALUES(?, ?, 1, ?)",
+                        (command.title, command.goal, now),
                     )
                     habit_id = int(cur.lastrowid or 0)
                     result.added.append(command.title)
-                conn.execute(
-                    "INSERT OR IGNORE INTO checkins"
-                    "(day, habit_id, status, reason, updated_at) "
-                    "VALUES(?, ?, 'pending', '', ?)",
-                    (day, habit_id, now),
+
+                current_goal = str(
+                    conn.execute(
+                        "SELECT goal FROM habits WHERE id = ?", (habit_id,)
+                    ).fetchone()["goal"]
+                    or ""
                 )
                 conn.execute(
-                    "UPDATE checkins SET status='pending', reason='', updated_at=? "
-                    "WHERE day=? AND habit_id=?",
-                    (now, day, habit_id),
+                    "INSERT OR IGNORE INTO checkins"
+                    "(day, habit_id, goal, status, reason, updated_at) "
+                    "VALUES(?, ?, ?, 'pending', '', ?)",
+                    (day, habit_id, current_goal, now),
+                )
+                # 目标变了就同步今天的快照；已经打过的卡保持原样
+                conn.execute(
+                    "UPDATE checkins SET goal=? WHERE day=? AND habit_id=?",
+                    (current_goal, day, habit_id),
                 )
                 continue
 
@@ -487,7 +537,7 @@ def _template_html() -> str:
         "P=完成 · F=未完成（写原因） · A=新增 · D=删除</div>"
         "P &lt;编号...&gt;<br>"
         "F &lt;编号...&gt; &lt;原因&gt;<br>"
-        "A &lt;每日待办，多个用分号&gt;<br>"
+        "A &lt;待办&gt;;&lt;目标&gt;（目标可省略，一行一个）<br>"
         "D &lt;编号...&gt;"
         "</div>"
     )
@@ -499,10 +549,15 @@ def _template_text() -> str:
             "P=完成  F=未完成（写原因）  A=新增  D=删除",
             "P <编号...>",
             "F <编号...> <原因>",
-            "A <每日待办，多个用分号>",
+            "A <待办>;<目标>（目标可省略，一行一个）",
             "D <编号...>",
         )
     )
+
+
+def _title_text(row: HabitRow) -> str:
+    """待办那一行：编号由调用方拼，这里是名称 + 目标。"""
+    return row.title if not row.goal else "{};{}".format(row.title, row.goal)
 
 
 def _status_text(row: HabitRow) -> str:
@@ -526,29 +581,29 @@ def render_daily(day: str, rows: List[HabitRow]) -> Tuple[str, str]:
         html_rows = "".join(
             '<div style="padding:10px 0;border-bottom:1px solid #f1f5f9;'
             'font-size:16px;color:#0f172a;">'
-            '<span style="display:inline-block;width:26px;color:#94a3b8;">{}. '
+            '<span style="display:inline-block;width:26px;color:#94a3b8;">{}'
             "</span>{}"
             '<div style="font-size:13px;color:#94a3b8;margin:2px 0 0 26px;">{}</div>'
             "</div>".format(
                 row.number,
-                escape(row.title),
+                escape(_title_text(row)),
                 escape(_stats_text(row)),
             )
             for row in rows
         )
         text_rows = "\n".join(
-            "{}. {}\n   {}".format(row.number, row.title, _stats_text(row))
+            "{} {}\n   {}".format(row.number, _title_text(row), _stats_text(row))
             for row in rows
         )
     else:
         html_rows = (
             '<div style="padding:12px 0;font-size:16px;color:#334155;">'
-            "今天还没有待办。回复 <b>新增 阅读 30 分钟</b> 添加第一条。</div>"
+            "今天还没有待办。回复 <b>新增 阅读;20分钟</b> 添加第一条。</div>"
         )
-        text_rows = "今天还没有待办。回复：新增 阅读 30 分钟"
+        text_rows = "今天还没有待办。回复：新增 阅读;20分钟"
 
     note = (
-        "P/F/D 可接多个编号；A 多个用分号。"
+        "P/F/D 可接多个编号；A 一行一个，分号后是目标（可省略）。"
         "没完成的必须写原因；没提到的会继续显示为未回复。"
     )
     html = (
@@ -610,30 +665,30 @@ def render_summary(day: str, result: ReplyResult, rows: List[HabitRow]) -> Tuple
         rows_html = "".join(
             '<div style="padding:9px 0;border-bottom:1px solid #f1f5f9;'
             'font-size:16px;color:#0f172a;">'
-            '<span style="display:inline-block;width:26px;color:#94a3b8;">{}.'
+            '<span style="display:inline-block;width:26px;color:#94a3b8;">{}'
             "</span>{}"
             '<div style="font-size:13px;color:#64748b;margin:2px 0 0 26px;">{}</div>'
             '<div style="font-size:12px;color:#94a3b8;margin:2px 0 0 26px;">{}</div>'
             "</div>".format(
                 row.number,
-                escape(row.title),
+                escape(_title_text(row)),
                 escape(_status_text(row)),
                 escape(_stats_text(row)),
             )
             for row in rows
         )
         rows_text = "\n".join(
-            "{}. {} — {}\n   {}".format(
-                row.number, row.title, _status_text(row), _stats_text(row)
+            "{} {} — {}\n   {}".format(
+                row.number, _title_text(row), _status_text(row), _stats_text(row)
             )
             for row in rows
         )
     else:
         rows_html = (
             '<div style="padding:12px 0;font-size:16px;color:#334155;">'
-            "当前没有待办。回复 <b>新增 阅读 30 分钟</b> 添加。</div>"
+            "当前没有待办。回复 <b>新增 阅读;20分钟</b> 添加。</div>"
         )
-        rows_text = "当前没有待办。回复：新增 阅读 30 分钟"
+        rows_text = "当前没有待办。回复：新增 阅读;20分钟"
 
     changes_block = (
         '<div style="font-size:14px;line-height:1.8;color:#334155;">'
