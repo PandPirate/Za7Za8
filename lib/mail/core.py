@@ -7,7 +7,7 @@
 * 插件抛异常也不会拖垮整封邮件，记一条警告继续下一个；
 * 区块按 priority 排序（小的在前），同一 priority 按 key 排。
 
-插件只负责「内容」，发信、编码、附件、版式、失败兜底都归框架。
+插件只负责内容，发信、编码、版式、失败兜底都归框架。
 """
 
 from __future__ import annotations
@@ -17,18 +17,17 @@ import logging
 import smtplib
 import ssl
 import urllib.request
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
+from . import __version__
 from .template import render_document
 
-CST = timezone(timedelta(hours=8))
-UTC = timezone.utc
-log = logging.getLogger("mailer")
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -59,41 +58,32 @@ class Plugin(Protocol):
 
 @dataclass
 class Context:
-    """运行时上下文：时间、是否离线、网络超时、插件数据目录、日历设置。"""
+    """运行时上下文：时间、网络超时、日历设置。"""
 
     now: datetime
-    offline: bool = False
     timeout: float = 15.0
-    root: Path = field(default_factory=lambda: Path(__file__).resolve().parent)
     calendar_backend: str = "auto"      # auto / graph / none
     calendar_name: str = ""             # 空则由插件自己决定
     calendar_plan_only: bool = False    # True 只演练、不落地
 
     def http_json(self, url: str) -> Any:
-        if self.offline:
-            raise RuntimeError("离线模式不发起网络请求")
         request = urllib.request.Request(
-            url, headers={"User-Agent": "mailer/1.0", "Accept": "application/json"}
+            url, headers={"User-Agent": "mail/{}".format(__version__), "Accept": "application/json"}
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
-
-    def snapshot(self, filename: str) -> Any:
-        """读插件自带的离线快照（plugins/data/*.json）。"""
-        path = self.root / "plugins" / "data" / filename
-        with open(str(path), encoding="utf-8") as fh:
-            return json.load(fh)
 
     def warn(self, message: str) -> None:
         log.warning(message)
 
 
 def load_plugins() -> Dict[str, Plugin]:
-    """扫描 mailer.plugins 包，把每个模块里的 PLUGIN 对象收集起来。"""
+    """扫描 `mail.plugins` 包，把每个模块里的 PLUGIN 对象收集起来。"""
     import importlib
     import pkgutil
 
-    package = importlib.import_module("mailer.plugins")
+    # 用 __package__ 而不是写死 "mail"：包再改名时插件发现不会默默变成 0 个
+    package = importlib.import_module(__package__ + ".plugins")
     found: Dict[str, Plugin] = {}
     for info in pkgutil.iter_modules(package.__path__):
         if info.name.startswith("_"):
@@ -145,7 +135,7 @@ def build_message(
     if cfg.to:
         message["To"] = ", ".join(cfg.to)
     message["Date"] = formatdate(localtime=False)
-    message["Message-ID"] = make_msgid(domain="mailer.local")
+    message["Message-ID"] = make_msgid(domain="za7za8.local")
     message["Auto-Submitted"] = "auto-generated"
     message.set_content(text)
     message.add_alternative(html, subtype="html")

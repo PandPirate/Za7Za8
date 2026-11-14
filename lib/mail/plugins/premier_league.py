@@ -1,29 +1,27 @@
 # -*- coding: utf-8 -*-
-"""英超插件：赛果、赛程、看点，外加一份当轮赛程的 .ics 附件。
+"""英超插件：上一轮赛果、下一轮赛程和看点，并把赛程写进 Outlook 日历。
 
-数据两条路：
-    实时：ESPN 的公开比分接口（eng.1 scoreboard），按日期区间一次取回；
-    离线：plugins/data/ 里的快照，--offline 或实时请求失败时用。
-
-没有网、也没有快照时不会硬编造比分——插件直接返回 None，这封邮件就不带英超区块。
+数据只来自 ESPN 的公开比分接口（eng.1 scoreboard）。取不到就返回 None，
+这封邮件干脆不带英超区块——不拿旧比分充数。
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from html import escape
 from typing import List, Optional
 
-from ..calendar_sync import CalendarEvent, CalendarResult, sync
-from ..core import CST, UTC, Section
+from constants import CST, UTC
+from graph_calendar import CalendarEvent, CalendarResult, sync
+
+from ..core import Section
 
 SCOREBOARD = (
     "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates={day}"
 )
-SNAPSHOT = "sample_pl_2026-11-09.json"
+CALENDAR_NAME = "英超赛程 2026-27"
 
 # ESPN 的英文队名 → 中文，没收录的原样保留
 TEAM_CN = {
@@ -65,6 +63,10 @@ ROUND_DATES = (
 # 「焦点战」的判定：两队都在这个名单里
 FOCUS_TEAMS = {"利物浦", "曼联", "曼城", "阿森纳", "切尔西", "热刺", "纽卡斯尔"}
 
+_LABEL = "font-size:12px;color:#64748b;letter-spacing:.04em;margin:20px 0 6px;"
+_LINE = "border-bottom:1px solid #f1f5f9;"
+_TOP = "border-top:1px solid #f1f5f9;"
+
 
 @dataclass
 class Match:
@@ -82,7 +84,11 @@ class Match:
 
     @property
     def finished(self) -> bool:
-        return self.state == "post" and self.home_score is not None
+        return (
+            self.state == "post"
+            and self.home_score is not None
+            and self.away_score is not None
+        )
 
     @property
     def goals(self) -> int:
@@ -101,13 +107,23 @@ class Match:
 
 
 def round_of(day: dt.date) -> Optional[int]:
-    """离这一天最近、且不晚于「次日」的那一轮。季末连着一周双赛也够用。"""
+    """这一天属于第几轮：取「不晚于次日」的最近一轮，季末一周双赛也够用。"""
     probe = day + dt.timedelta(days=1)
     best = None
     for index, text in enumerate(ROUND_DATES, 1):
         if dt.date.fromisoformat(text) <= probe:
             best = index
     return best
+
+
+def _score(side, finished: bool) -> Optional[int]:
+    raw = side.get("score")
+    if not finished or raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_espn(payload) -> List[Match]:
@@ -120,23 +136,13 @@ def parse_espn(payload) -> List[Match]:
             continue
         state = competition.get("status", {}).get("type", {}).get("state", "pre")
         finished = state == "post"
-
-        def score(side):
-            raw = side.get("score")
-            if not finished or raw in (None, ""):
-                return None
-            try:
-                return int(raw)
-            except (TypeError, ValueError):
-                return None
-
         matches.append(
             Match(
                 kickoff=dt.datetime.fromisoformat(event["date"].replace("Z", "+00:00")),
                 home=TEAM_CN.get(home["team"]["displayName"], home["team"]["displayName"]),
                 away=TEAM_CN.get(away["team"]["displayName"], away["team"]["displayName"]),
-                home_score=score(home),
-                away_score=score(away),
+                home_score=_score(home, finished),
+                away_score=_score(away, finished),
                 state=state,
                 venue=(competition.get("venue") or {}).get("fullName", ""),
             )
@@ -144,25 +150,7 @@ def parse_espn(payload) -> List[Match]:
     return matches
 
 
-def parse_snapshot(payload) -> List[Match]:
-    matches: List[Match] = []
-    for item in payload.get("matches", []):
-        score = item.get("score") or [None, None]
-        matches.append(
-            Match(
-                kickoff=dt.datetime.fromisoformat(item["kickoff"].replace("Z", "+00:00")),
-                home=item["home"],
-                away=item["away"],
-                home_score=score[0],
-                away_score=score[1],
-                state=item.get("state", "pre"),
-                venue=item.get("venue", ""),
-            )
-        )
-    return matches
-
-
-def _season_days(ctx, payload):
+def _season_days(payload) -> List[dt.date]:
     """响应里的 leagues[].calendar 是整季的比赛日，拿它决定要请求哪几天。"""
     days = []
     for league in payload.get("leagues", []):
@@ -174,6 +162,15 @@ def _season_days(ctx, payload):
     return days
 
 
+def _safe_json(ctx, url):
+    """单日取失败不算致命——少一天数据总比整封邮件没有强。"""
+    try:
+        return ctx.http_json(url)
+    except Exception as exc:
+        ctx.warn("取英超 {} 的数据失败：{}".format(url.rsplit("=", 1)[-1], exc))
+        return None
+
+
 def _fetch_live(ctx) -> List[Match]:
     """先取今天的响应拿到赛季日历，再只请求窗口内的比赛日。
 
@@ -182,13 +179,13 @@ def _fetch_live(ctx) -> List[Match]:
     """
     today = ctx.now.astimezone(UTC).date()
     seed = ctx.http_json(SCOREBOARD.format(day=today.strftime("%Y%m%d")))
-    calendar = _season_days(ctx, seed)
+    calendar = _season_days(seed)
 
-    low = today - dt.timedelta(days=9)
-    high = today + dt.timedelta(days=30)
+    low = today - dt.timedelta(days=14)
+    high = today + dt.timedelta(days=40)
     wanted = sorted({day for day in calendar if low <= day <= high})
     if not wanted:  # 没有日历（接口变了）就隔三天探一次，别盲扫
-        wanted = [today + dt.timedelta(days=offset) for offset in range(-9, 31, 3)]
+        wanted = [today + dt.timedelta(days=offset) for offset in range(-14, 41, 3)]
 
     matches: List[Match] = []
     seen = set()
@@ -214,52 +211,36 @@ def _fetch_live(ctx) -> List[Match]:
     return matches
 
 
-def _safe_json(ctx, url):
-    """单日取失败不算致命——少一天数据总比整封邮件没有强。"""
+def load_matches(ctx):
+    """实时赛程；取不到就返回空列表，由插件决定不产出这一块。"""
     try:
-        return ctx.http_json(url)
+        return _fetch_live(ctx), "ESPN 实时比分"
     except Exception as exc:
-        ctx.warn("取英超 {} 的数据失败：{}".format(url.rsplit("=", 1)[-1], exc))
-        return None
-
-
-def load_matches(ctx) -> "tuple[List[Match], str]":
-    if not ctx.offline:
-        try:
-            return _fetch_live(ctx), "ESPN 实时比分"
-        except Exception as exc:  # 网络不通就退回快照
-            ctx.warn("英超实时数据拉取失败（{}），改用离线快照".format(exc))
-    try:
-        payload = ctx.snapshot(SNAPSHOT)
-    except Exception as exc:
-        ctx.warn("没有可用的英超快照（{}），本次跳过".format(exc))
+        ctx.warn("英超数据拉取失败：{}".format(exc))
         return [], "无数据"
-    return parse_snapshot(payload), "离线快照 · {}".format(payload.get("captured_at", ""))
 
 
 # ---------------------------------------------------------------- 排版
 
 
-def _subtitle(text: str) -> str:
-    return (
-        '<div style="font-size:12px;color:#64748b;letter-spacing:.04em;'
-        'margin:18px 0 4px;">' + text + "</div>"
-    )
+def _label(text: str) -> str:
+    return '<div style="{}">{}</div>'.format(_LABEL, escape(text))
 
 
 def _results_table(matches: List[Match]) -> str:
     rows = []
     for match in matches:
-        home_style = "font-weight:700;" if match.home_score > match.away_score else ""
-        away_style = "font-weight:700;" if match.away_score > match.home_score else ""
+        home_bold = "font-weight:700;" if match.home_score > match.away_score else ""
+        away_bold = "font-weight:700;" if match.away_score > match.home_score else ""
         rows.append(
             "<tr>"
-            f'<td style="padding:9px 10px 9px 0;border-bottom:1px solid #eef2f7;color:#64748b;'
-            f'font-size:12px;white-space:nowrap;">{match.when()}</td>'
-            f'<td style="padding:9px 10px 9px 0;border-bottom:1px solid #eef2f7;text-align:right;{home_style}">{match.home}</td>'
-            f'<td style="padding:9px 0;border-bottom:1px solid #eef2f7;text-align:center;font-weight:700;'
+            f'<td style="padding:8px 10px 8px 0;{_LINE}color:#94a3b8;font-size:12px;'
+            f'white-space:nowrap;">{match.when()}</td>'
+            f'<td style="padding:8px 10px 8px 0;{_LINE}text-align:right;{home_bold}">'
+            f"{escape(match.home)}</td>"
+            f'<td style="padding:8px 0;{_LINE}text-align:center;font-weight:600;'
             f'white-space:nowrap;color:#0f172a;">{match.home_score} - {match.away_score}</td>'
-            f'<td style="padding:9px 0 9px 10px;border-bottom:1px solid #eef2f7;{away_style}">{match.away}</td>'
+            f'<td style="padding:8px 0 8px 10px;{_LINE}{away_bold}">{escape(match.away)}</td>'
             "</tr>"
         )
     return (
@@ -268,67 +249,36 @@ def _results_table(matches: List[Match]) -> str:
     )
 
 
-def _group_by_day(matches: List[Match]) -> list:
-    """按北京时间的日期分组。中间没比赛的日子也补一格，看起来才像日历。"""
+def _group_by_day(matches: List[Match]):
     buckets = {}
     for match in matches:
         buckets.setdefault(match.local.date(), []).append(match)
-    if not buckets:
-        return []
-    days = sorted(buckets)
-    span = (days[-1] - days[0]).days + 1
-    if span <= 7:
-        days = [days[0] + dt.timedelta(days=i) for i in range(span)]
-    return [(day, sorted(buckets.get(day, []), key=lambda m: m.kickoff)) for day in days]
+    return [
+        (day, sorted(items, key=lambda m: m.kickoff))
+        for day, items in sorted(buckets.items())
+    ]
 
 
-def _wd(day) -> str:
+def _weekday(day) -> str:
     return "周" + "一二三四五六日"[day.weekday()]
 
 
-def _week_strip(days) -> str:
-    """一排日期格子，有比赛的那天点亮。"""
-    width = max(1, int(100 / max(1, len(days))))
-    cells = []
-    for day, items in days:
-        active = bool(items)
-        bg = "#eef2ff" if active else "#f8fafc"
-        fg = "#1f2937" if active else "#94a3b8"
-        accent = "#4338ca" if active else "#cbd5e1"
-        label = "{} 场".format(len(items)) if items else "—"
-        cells.append(
-            f'<td width="{width}%" align="center" style="padding:0 3px;vertical-align:top;">'
-            f'<div style="background:{bg};border-radius:10px;padding:9px 2px 10px 2px;">'
-            f'<div style="font-size:11px;color:{accent};line-height:1.5;">{_wd(day)}</div>'
-            f'<div style="font-size:18px;font-weight:700;color:{fg};line-height:1.25;">{day.day}</div>'
-            f'<div style="font-size:11px;color:{accent};line-height:1.5;">{label}</div>'
-            f"</div></td>"
-        )
-    return (
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="border-collapse:separate;border-spacing:6px 0;margin:0 -3px;table-layout:fixed;">'
-        "<tr>" + "".join(cells) + "</tr></table>"
-    )
-
-
-def _agenda(days) -> str:
-    """按天排的赛程清单，左边日期、右边当天所有场次。"""
+def _agenda(matches: List[Match]) -> str:
+    """按天排的赛程：左边日期，右边当天所有场次。"""
     rows = []
-    for day, items in days:
-        if not items:
-            continue
+    for day, items in _group_by_day(matches):
         lines = "<br>".join(
-            f'<span style="color:#64748b;">{m.local:%H:%M}</span> {m.home}'
-            f' <span style="color:#94a3b8;">vs</span> {m.away}'
-            for m in items
+            f'<span style="color:#94a3b8;">{match.local:%H:%M}</span> {escape(match.home)} '
+            f'<span style="color:#cbd5e1;">vs</span> {escape(match.away)}'
+            for match in items
         )
         rows.append(
             "<tr>"
-            f'<td width="96" valign="top" style="padding:9px 12px 9px 0;border-top:1px solid #eef2f7;'
-            f'font-size:13px;font-weight:600;color:#0f172a;white-space:nowrap;">'
-            f"{day.month}/{day.day} {_wd(day)}</td>"
-            f'<td style="padding:9px 0;border-top:1px solid #eef2f7;font-size:14px;'
-            f'line-height:1.9;color:#0f172a;">{lines}</td>'
+            f'<td width="92" valign="top" style="padding:8px 12px 8px 0;{_TOP}font-size:13px;'
+            f'font-weight:600;color:#0f172a;white-space:nowrap;">'
+            f"{day.month}/{day.day} {_weekday(day)}</td>"
+            f'<td style="padding:8px 0;{_TOP}font-size:14px;line-height:1.8;color:#0f172a;">'
+            f"{lines}</td>"
             "</tr>"
         )
     return (
@@ -337,30 +287,9 @@ def _agenda(days) -> str:
     )
 
 
-def _calendar_block(matches: List[Match]) -> str:
-    days = _group_by_day(matches)
-    return _week_strip(days) + _agenda(days)
-
-
 def _bullets(items: List[str]) -> str:
-    if not items:
-        return ""
     lis = "".join(
-        '<li style="margin:5px 0;color:#334155;">' + item + "</li>" for item in items
-    )
-    return '<ul style="margin:2px 0 0;padding-left:18px;font-size:14px;">' + lis + "</ul>"
-
-
-def _calendar_block(matches: List[Match]) -> str:
-    days = _group_by_day(matches)
-    return _week_strip(days) + _agenda(days)
-
-
-def _bullets(items: List[str]) -> str:
-    if not items:
-        return ""
-    lis = "".join(
-        '<li style="margin:5px 0;color:#334155;">' + item + "</li>" for item in items
+        '<li style="margin:4px 0;color:#334155;">' + escape(item) + "</li>" for item in items
     )
     return '<ul style="margin:2px 0 0;padding-left:18px;font-size:14px;">' + lis + "</ul>"
 
@@ -369,13 +298,8 @@ def _calendar_events(matches: List[Match], round_no: Optional[int]) -> List[Cale
     events = []
     for match in matches:
         start = match.kickoff.astimezone(UTC)
-        # key 用哈希，保持 ASCII 且对同一场比赛稳定（重复跑不会长出副本）
-        digest = hashlib.md5(
-            "{}|{}|{}".format(start.strftime("%Y%m%dT%H%M"), match.home, match.away).encode("utf-8")
-        ).hexdigest()[:12]
         events.append(
             CalendarEvent(
-                key="mailer:pl:" + digest,
                 subject="英超 {} vs {}".format(match.home, match.away),
                 start=start,
                 end=start + dt.timedelta(hours=2),
@@ -394,7 +318,7 @@ def _calendar_events(matches: List[Match], round_no: Optional[int]) -> List[Cale
 class PremierLeaguePlugin:
     name = "premier_league"
     title = "英超快报"
-    description = "英超最近赛果、下一轮赛程、看点，并把赛程写进本机日历"
+    description = "英超上一轮赛果、下一轮赛程、看点，并把赛程写进 Outlook 日历"
     enabled_by_default = True
 
     def build(self, ctx) -> Optional[Section]:
@@ -403,7 +327,7 @@ class PremierLeaguePlugin:
             return None
 
         now = ctx.now
-        played = sorted([m for m in matches if m.finished], key=lambda m: m.kickoff, reverse=True)
+        played = sorted((m for m in matches if m.finished), key=lambda m: m.kickoff, reverse=True)
         last_round = round_of(played[0].local.date()) if played else None
         finished = (
             [m for m in played if round_of(m.local.date()) == last_round][:12]
@@ -411,11 +335,7 @@ class PremierLeaguePlugin:
             else played[:10]
         )
         upcoming = sorted(
-            [
-                m
-                for m in matches
-                if not m.finished and m.kickoff >= now - dt.timedelta(hours=3)
-            ],
+            (m for m in matches if not m.finished and m.kickoff >= now - dt.timedelta(hours=3)),
             key=lambda m: m.kickoff,
         )
         next_round = round_of(upcoming[0].local.date()) if upcoming else None
@@ -424,20 +344,16 @@ class PremierLeaguePlugin:
             if next_round
             else upcoming[:10]
         )
-
         if not finished and not fixtures:
             return None
 
-
-        parts_html: List[str] = []
-        parts_text: List[str] = []
+        html: List[str] = []
+        text: List[str] = []
 
         if finished:
-            head = "赛果 · 第 {} 轮".format(last_round) if last_round else "赛果 · 最近完赛"
-            parts_html.append(_subtitle(head))
-            parts_html.append(_results_table(finished))
-            parts_text.append(head)
-            parts_text += [
+            head = "赛果 · 第 {} 轮".format(last_round) if last_round else "赛果"
+            html += [_label(head), _results_table(finished)]
+            text += [head] + [
                 "· {}  {} {}-{} {}".format(
                     m.when(), m.home, m.home_score, m.away_score, m.away
                 )
@@ -445,68 +361,60 @@ class PremierLeaguePlugin:
             ]
 
         if fixtures:
-            span = "{}–{}".format(fixtures[0].local.strftime("%m/%d"), fixtures[-1].local.strftime("%m/%d"))
+            first, last = fixtures[0].local, fixtures[-1].local
+            span = first.strftime("%m/%d")
+            if first.date() != last.date():
+                span += "–" + last.strftime("%m/%d")
             head = "赛程 · 第 {} 轮".format(next_round) if next_round else "赛程"
-            parts_html.append(_subtitle("{}（{}，北京时间）".format(head, span)))
-            parts_html.append(_calendar_block(fixtures))
-            parts_text.append("")
-            parts_text.append("{}（{}，北京时间）".format(head, span))
+            html += [_label("{} · {}（北京时间）".format(head, span)), _agenda(fixtures)]
+            text += ["", "{} · {}（北京时间）".format(head, span)]
             for day, items in _group_by_day(fixtures):
-                if not items:
-                    continue
-                parts_text.append("{}/{} {}".format(day.month, day.day, _wd(day)))
-                parts_text += [
-                    "  {}  {}".format(m.local.strftime("%H:%M"), m.label()) for m in items
-                ]
+                text.append("{}/{} {}".format(day.month, day.day, _weekday(day)))
+                text += ["  {}  {}".format(m.local.strftime("%H:%M"), m.label()) for m in items]
 
         insights = self._insights(finished, fixtures)
         if insights:
-            parts_html.append(_subtitle("看点"))
-            parts_html.append(_bullets(insights))
-            parts_text.append("")
-            parts_text.append("看点")
-            parts_text += ["· " + item for item in insights]
+            html += [_label("看点"), _bullets(insights)]
+            text += ["", "看点"] + ["· " + item for item in insights]
 
         events = _calendar_events(fixtures, next_round) if fixtures else []
         result = self._sync_calendar(ctx, events)
-        if result is not None and result.line():
-            parts_html.append(
-                '<div style="margin-top:16px;padding:10px 12px;background:#f8fafc;border-radius:8px;'
-                'font-size:13px;color:#334155;">🗓 {}</div>'.format(escape(result.line()))
-            )
-            parts_text.append("")
-            parts_text.append(result.line())
 
-        parts_html.append(
-            '<div style="margin-top:16px;font-size:12px;color:#94a3b8;">数据来源：{}</div>'.format(source)
+        notes_html: List[str] = []
+        notes_text: List[str] = []
+        if result is not None and result.line():
+            notes_html.append(escape(result.line()))
+            notes_text.append(result.line())
+        notes_html.append("数据：" + escape(source))
+        notes_text.append("数据：" + source)
+        html.append(
+            '<div style="margin-top:18px;font-size:12px;color:#94a3b8;line-height:1.7;">'
+            + "<br>".join(notes_html)
+            + "</div>"
         )
-        parts_text.append("")
-        parts_text.append("数据来源：" + source)
+        text += ["", *notes_text]
 
         return Section(
             key=self.name,
             title=self.title,
-            html="".join(parts_html),
-            text="\n".join(parts_text),
+            html="".join(html),
+            text="\n".join(text).strip(),
             priority=10,
         )
 
     @staticmethod
     def _sync_calendar(ctx, events) -> Optional[CalendarResult]:
-        """把赛程写进 Graph 上的 Outlook 日历；失败也不影响这封信，只在正文里注明。"""
+        """把赛程写进 Outlook 日历；失败也不影响这封信，只在正文里注明。"""
         if not events or ctx.calendar_backend == "none":
             return None
-        name = ctx.calendar_name or "英超赛程 2026-27"
+        name = ctx.calendar_name or CALENDAR_NAME
         try:
             return sync(
-                events,
-                name,
-                backend=ctx.calendar_backend,
-                plan_only=ctx.calendar_plan_only,
+                events, name, backend=ctx.calendar_backend, plan_only=ctx.calendar_plan_only
             )
         except Exception as exc:
             ctx.warn("写日历失败：{}".format(exc))
-            return CalendarResult("none", name, note="Graph 调用失败，检查登录状态")
+            return CalendarResult("none", name, note="写日历失败，详情看日志")
 
     @staticmethod
     def _insights(finished: List[Match], fixtures: List[Match]) -> List[str]:
@@ -523,7 +431,7 @@ class PremierLeaguePlugin:
         for match in focus[:2]:
             items.append("焦点战：{}（{}）".format(match.label(), match.when()))
         if fixtures and not focus:
-            items.append("下轮最早开球：{}（{}）".format(fixtures[0].label(), fixtures[0].when()))
+            items.append("最早开球：{}（{}）".format(fixtures[0].label(), fixtures[0].when()))
         return items
 
 

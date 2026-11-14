@@ -31,7 +31,7 @@ def render_text(sections: Sequence, now: datetime, brand: str) -> str:
         parts.append(section.text.strip())
         parts.append("")
     parts.append(rule)
-    parts.append("本邮件由邮件框架生成 · {}".format("、".join(s.title for s in sections)))
+    parts.append("时间均为北京时间，数据以官方/赛会公布为准。")
     return "\n".join(parts).strip() + "\n"
 
 
@@ -90,8 +90,7 @@ def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str
       <td style="padding:20px 28px 24px 28px;border-top:1px solid #eef2f7;">
         <div style="font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;
                     line-height:1.7;color:#94a3b8;">
-          由邮件框架生成 · {titles}<br>
-          时间均为北京时间；数据以官方/赛会公布为准，仅供个人参考。
+          时间均为北京时间 · 数据以官方/赛会公布为准
         </div>
       </td>
     </tr>
@@ -105,7 +104,6 @@ def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str
         brand=_escape(brand),
         subtitle=_escape(subtitle),
         blocks="".join(blocks),
-        titles=_escape("、".join(s.title for s in sections)),
     )
     return html, render_text(sections, now, brand)
 

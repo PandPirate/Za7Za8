@@ -73,15 +73,15 @@ export MAILER_GRAPH_CLIENT_ID=<第 3 步抄的客户端 ID>
 python scripts/send_digest.py --graph-login
 ```
 
-终端会打印：
+终端会给出验证地址（通常已带上代码）和有效期：
 
 ```
-1) 打开 https://microsoft.com/devicelogin
-2) 输入代码 ABCD1234
-3) 用要写入日历的那个邮箱登录并同意（900 秒内有效）
+浏览器打开这个链接（码已带上）：
+  https://microsoft.com/devicelogin?otc=ABCD1234
+用要写入日历的那个邮箱登录并同意，900 秒内有效
 ```
 
-浏览器打开那个网址，输入 8 位码，然后：
+浏览器打开它，用要写日历的邮箱登录并同意；链接没带代码时，手输终端里给的 8 位码。
 
 - 登录页**不要用默认账号**，点「使用其他帐户」→ 输入要写日历的邮箱；
 - 权限确认页看到「读取和写入你的日历」→ **接受**。
@@ -89,7 +89,7 @@ python scripts/send_digest.py --graph-login
 几秒后终端出现：
 
 ```
-登录成功，token 已存到 /path/downloads/.graph_token.json
+登录成功，token 已存到 `<仓库>/state/.graph_token.json`
 ```
 
 卡在等待不动，通常是浏览器那步没走完（登错号、或者没点「接受」）。900 秒会超时，重跑就行。
@@ -101,8 +101,8 @@ python scripts/send_digest.py --graph-whoami
 ```
 
 ```
-当前 token 属于： pirate panda
-账号：glycyrrhizin@outlook.com
+当前 token 属于：你的昵称
+账号：you@outlook.com
 日历会写到这个账号的邮箱里
 ```
 
@@ -114,7 +114,7 @@ python scripts/send_digest.py --graph-whoami
 python scripts/send_digest.py --dry-run --apply-calendar
 ```
 
-正文底部出现 `已同步到 Outlook 日历「英超赛程 2026-27」：新建 10 场` 就成了，
+正文底部出现 `日历：新建 10 场、更新 0 场（「英超赛程 2026-27」）` 就成了，
 打开 <https://outlook.live.com/calendar> 能看到这个日历文件夹。
 
 ## 四、报错对照
@@ -126,45 +126,34 @@ python scripts/send_digest.py --dry-run --apply-calendar
 | `AADSTS700016`、「应用不存在」 | client ID 抄错，或抄成了对象 ID | 一 · 3 |
 | `AADSTS7000218`、「需要 client_assertion」 | 没开「允许公共客户端流」 | 一 · 4 |
 | `AADSTS65001`、「用户或管理员未同意」 | 权限没加，或浏览器里点了拒绝 | 一 · 5 / 二 |
-| `AADSTS90002`、「租户不存在」 | `MAILER_GRAPH_TENANT` 填的不是租户 ID | 见下节 |
+| `AADSTS90002`、「租户不存在」 | `MAILER_GRAPH_TENANT` 填的不是租户 ID | 去掉 `MAILER_GRAPH_TENANT`，用默认 `common` |
 | 终端一直等，没有结果 | 浏览器那步没完成 | 二 |
 | `--graph-whoami` 显示别的账号 | 登录时登错号 | `--graph-logout` 后重来 |
 
-## 五、个人账户的 access_token 不是 JWT，这是正常的
+## 五、个人账户的 access_token 不是 JWT
 
-这条单独拎出来说，因为它坑过很久：
+个人账户（`@outlook.com`）拿到的 access_token 常常是 `EwB…` 开头的**不透明长串**，
+一个点都没有——这是正常的，Graph 照收。判断一枚票能不能用，**唯一的标准是拿它调一次
+`GET /me`**，返回 200 就是能用；别按「是不是 JWT」拦截，那会把个人账户的票全部误杀。
 
-| 账户类型 | access_token 长什么样 | 能不能调 Graph |
-| --- | --- | --- |
-| 组织账户（`@company.com`） | 三段 JWT，`eyJ…` | 能 |
-| 个人账户（`@outlook.com` 这类） | 常常是 `EwB…` 开头的**不透明长串**，一个点都没有 | **照样能** |
-
-判断一枚票能不能用，**唯一的标准是拿它调一次 `GET /me`**，返回 200 就是能用。别用「是不是
-JWT」做拦截——那会把个人账户的票全部误杀。
-
-顺带三条经验：
-
-- `id_token` 一定是 JWT，`aud` 是你的 client_id，可以离线验签；`access_token` 不讲这个规矩；
-- `EwB…` 票的 `refresh_token` 前缀形如 `M.C532_...`，是消费级账号服务的产物，正常；
-- 出现 `AADSTS90002`（租户不存在）几乎都是把「对象 ID」「应用程序 ID」当租户 ID 填了，
-  或者干脆不该设 `MAILER_GRAPH_TENANT`（默认 `common` 就对）。
+`--graph-whoami` 做的就是这件事；登录时如果提示「不透明票」，可以不管。
 
 ## 六、token 存在哪
 
-`<仓库>/downloads/.graph_token.json`，可以用 `MAILER_GRAPH_TOKEN` 改路径。内容是:
+`<仓库>/state/.graph_token.json`，可以用 `MAILER_GRAPH_TOKEN` 改路径。内容是：
 
 ```json
 {"client_id": "...", "tenant": "common", "refresh_token": "...", "access_token": "...", "expires_at": 1762...}
 ```
 
-- **等于密码**：`downloads/` 已经在 `.gitignore` 里，别改成别的目录、别贴出来；
+- **等于密码**：`state/` 已经在 `.gitignore` 里，别改到别的目录、别贴出来；
 - 过期会自动用 `refresh_token` 续，不用管；
 - 换账号、换应用、被撤销授权：`python scripts/send_digest.py --graph-logout`，然后重新登录；
 - 在 QQ 邮箱的「已授权应用」里也能撤销，撤销后 token 立即失效。
 
 ## 七、定时任务与换机器
 
-**cron 必须和登录时的系统用户一致**，否则读不到 `downloads/.graph_token.json`。用 root 的
+**cron 必须和登录时的系统用户一致**，否则读不到 `state/.graph_token.json`。用 root 的
 crontab 就跑在 root 下、文件也放在 root 能读到的地方。
 
 换机器有两种做法：

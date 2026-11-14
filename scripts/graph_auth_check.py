@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""msa_jwt.py —— 设备代码流登录，拿票、验签、并实调 Graph 验证票能不能用。
+"""graph_auth_check.py —— Graph 认证自检：拿票、验签、并实调 /me 看能不能用。
 
 零依赖，只用标准库。要分清两件事：
 
@@ -10,15 +10,18 @@
 
 所以本脚本最终以「Graph /me 返回 200」为成功判据，而不是「是不是 JWT」。
 
+取票 / 换票 / token 缓存全部复用 `lib/graph_calendar.py`——和 `send_digest.py --graph-login`
+是同一套实现、同一个缓存文件，不会两边漂移。这里只保留诊断独有能力：JWT 解码验签、
+scope 探针、把结论说清楚。
+
 用法：
 
-    python scripts/msa_jwt.py --client-id <应用ID>
-    python scripts/msa_jwt.py --client-id <应用ID> --probe-scopes
-    python scripts/msa_jwt.py --reuse              # 复用缓存，不重新登录
-    python scripts/msa_jwt.py --token eyJ0eXAi...  # 只检查一枚现成的票
+    python scripts/graph_auth_check.py --client-id <应用ID>
+    python scripts/graph_auth_check.py --client-id <应用ID> --probe-scopes
+    python scripts/graph_auth_check.py --reuse              # 复用已有 token 缓存
+    python scripts/graph_auth_check.py --token eyJ0eXAi...  # 只检查一枚现成的票
 
-client_id 也可以走环境变量 MAILER_GRAPH_CLIENT_ID（和 mailer 包共用）。
-
+client_id 也可以走环境变量 MAILER_GRAPH_CLIENT_ID（和 send_digest 共用）。
 退出码：0 = Graph 接受这枚票；1 = 被拒；2 = 参数 / 网络 / 授权问题。
 """
 
@@ -32,13 +35,11 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from pathlib import Path
 
-GRAPH = "https://graph.microsoft.com/v1.0"
-AUTHORITY = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0"
+import _bootstrap  # noqa: F401  （把 lib/ 放进 sys.path）
+
+import graph_calendar as gc
+
 # common 的这组公钥同时覆盖 AAD 各租户和 MSA（9188040d），不必按 iss 分头取
 JWKS_URL = "https://login.microsoftonline.com/common/discovery/v2.0/keys"
 MSA_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad"
@@ -58,47 +59,10 @@ PROBES = [
     ("只有 OIDC，不带资源", "openid profile email offline_access"),
 ]
 
-_OPENER = None
 _KEYS_CACHE: dict = {}
-
-# 登录一次就把 token 存这里，后面 --reuse 不用重新走设备码（downloads/ 已在 .gitignore）
-CACHE_PATH = Path(__file__).resolve().parents[1] / "downloads" / ".msa_jwt.json"
 
 
 # ---------------------------------------------------------------- 基础工具
-
-
-def set_proxy(url: str) -> None:
-    global _OPENER
-    _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({"http": url, "https": url}))
-
-
-def _opener():
-    return _OPENER or urllib.request.build_opener()
-
-
-def http_json(url: str, form: dict | None = None, timeout: int = 30) -> tuple[int, dict]:
-    """POST 表单 / GET，返回 (status, json)。HTTP 错误也尽量把 body 解出来，OAuth 的错因都在里面。"""
-    data = urllib.parse.urlencode(form).encode("utf-8") if form is not None else None
-    request = urllib.request.Request(url, data=data)
-    if data is not None:
-        request.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with _opener().open(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
-            return response.status, _maybe_json(raw)
-    except urllib.error.HTTPError as exc:
-        return exc.code, _maybe_json(exc.read().decode("utf-8", "replace"))
-    except urllib.error.URLError as exc:
-        raise SystemExit("网络错误：{}（目标 {}）".format(exc.reason, url.split("/")[2]))
-
-
-def _maybe_json(raw: str) -> dict:
-    try:
-        value = json.loads(raw)
-        return value if isinstance(value, dict) else {"value": value}
-    except ValueError:
-        return {"raw": raw}
 
 
 def b64u_decode(segment: str) -> bytes:
@@ -145,9 +109,9 @@ def rsa_verify_rs256(signing_input: bytes, signature: bytes, jwk: dict) -> bool:
 
 def _keys() -> list:
     if "v2" not in _KEYS_CACHE:
-        status, body = http_json(JWKS_URL)
-        if status != 200 or "keys" not in body:
-            raise SystemExit("拿不到签名公钥（HTTP {}）：{}".format(status, short(body, 200)))
+        body = gc.fetch_json(JWKS_URL)
+        if "keys" not in body:
+            raise SystemExit("公钥响应里没有 keys：{}".format(short(body, 200)))
         _KEYS_CACHE["v2"] = body["keys"]
     return _KEYS_CACHE["v2"]
 
@@ -227,110 +191,16 @@ def describe(label: str, token: str, client_id: str = "") -> tuple[dict | None, 
     return claims, ok
 
 
-# ---------------------------------------------------------------- token 缓存
+# ---------------------------------------------------------------- 错误说明
 
 
-def save_cache(client_id: str, tenant: str, token: dict) -> None:
-    if not token.get("refresh_token"):
-        return
-    payload = {
-        "client_id": client_id,
-        "tenant": tenant,
-        "refresh_token": token.get("refresh_token", ""),
-        "access_token": token.get("access_token", ""),
-        "expires_at": int(time.time()) + int(token.get("expires_in", 3600)),
-    }
-    try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(json.dumps(payload), encoding="utf-8")
-        CACHE_PATH.chmod(0o600)
-    except OSError:
-        pass
-
-
-def load_cache() -> dict:
-    try:
-        return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def refresh_token_login(client_id: str, tenant: str, scope: str, refresh_token: str) -> dict:
-    """用缓存的 refresh_token 换新票，不重新走设备码。"""
-    print("复用缓存里的 refresh_token（不重新登录）：{}".format(CACHE_PATH))
-    status, token = http_json(
-        AUTHORITY.format(tenant=tenant) + "/token",
-        {
-            "client_id": client_id,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "scope": scope,
-        },
-    )
-    if status != 200:
-        _fail_oauth("refresh_token 换票失败", token)
-        return {}
-    return token
-
-
-# ---------------------------------------------------------------- 设备代码流
-
-
-def device_login(client_id: str, tenant: str, scope: str) -> dict:
-    base = AUTHORITY.format(tenant=tenant)
-    section("① 申请设备码")
-    status, device = http_json(base + "/devicecode", {"client_id": client_id, "scope": scope})
-    if status != 200:
-        _fail_oauth("设备码申请失败", device)
-        return {}
-
-    print("  scope : {}".format(short(scope, 120)))
-    if device.get("message"):
-        print("  提示  : {}".format(device["message"]))
-    print()
-    print("  1) 打开 https://microsoft.com/devicelogin")
-    print("  2) 输入代码  {}".format(device.get("user_code", "")))
-    print("  3) 用目标账号登录并同意（{} 秒内有效）".format(device.get("expires_in", 900)))
-    print()
-    print("  等待授权中…", end="", flush=True)
-
-    interval = int(device.get("interval", 5))
-    deadline = time.time() + int(device.get("expires_in", 900))
-    while time.time() < deadline:
-        time.sleep(interval)
-        print(".", end="", flush=True)
-        status, token = http_json(
-            base + "/token",
-            {
-                "client_id": client_id,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "device_code": device.get("device_code", ""),
-            },
-        )
-        if status == 200:
-            print(" 完成")
-            return token
-        error = token.get("error", "")
-        if error == "authorization_pending":
-            continue
-        if error == "slow_down":
-            interval += 5
-            continue
-        print()
-        _fail_oauth("换 token 失败", token)
-        return {}
-    print()
-    print("✗ 等满 {} 秒还没完成授权，重跑一次".format(int(device.get("expires_in", 900))))
-    return {}
-
-
-def _fail_oauth(prefix: str, body: dict) -> None:
-    print("✗ {}".format(prefix))
-    print("  error: {}".format(body.get("error", "?")))
-    description = body.get("error_description", "")
-    if description:
-        print("  描述 : {}".format(description.split("\r\n")[0][:300]))
-    hint = {
+def explain(exc) -> None:
+    """把 OAuth / Graph 的报错翻译成「下一步该改什么」。"""
+    code = getattr(exc, "code", "") or ""
+    print("✗ {}".format(exc))
+    if code:
+        print("  error: {}".format(code))
+    hints = {
         "AADSTS700016": "client_id 不对，或应用不在该租户里",
         "AADSTS7000218": "应用没开「允许公共客户端流」",
         "AADSTS65001": "权限没加在「Microsoft Graph → 委托的权限」下，或浏览器里点了拒绝",
@@ -340,10 +210,12 @@ def _fail_oauth(prefix: str, body: dict) -> None:
         "AADSTS500200": "应用只收组织账户，个人账户被拒",
         "invalid_grant": "refresh_token 过期或被撤销，重新登录一次",
         "invalid_scope": "scope 写法不被接受，试试完整 URI",
+        "unauthorized": "Graph 明确拒绝这枚票：查 client_id / API 权限 / signInAudience",
     }
-    for code, text in hint.items():
-        if code in (body.get("error", "") + description):
-            print("  可能原因：{}".format(text))
+    text = code + " " + str(exc)
+    for marker, hint in hints.items():
+        if marker in text:
+            print("  可能原因：{}".format(hint))
             break
 
 
@@ -355,20 +227,12 @@ def probe_scopes(client_id: str, tenant: str, refresh_token: str) -> dict:
     if not refresh_token:
         print("  没有 refresh_token，跳过（登录时没要 offline_access？）")
         return {}
-    base = AUTHORITY.format(tenant=tenant)
     verdict = {}
     for name, scope in PROBES:
-        status, body = http_json(
-            base + "/token",
-            {
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "scope": scope,
-            },
-        )
-        if status != 200:
-            print("  ✗ {:<20} {}".format(name, short(body.get("error", "?"), 60)))
+        try:
+            body = gc.exchange_refresh_token(client_id, tenant, scope, refresh_token)
+        except gc.GraphError as exc:
+            print("  ✗ {:<20} {}".format(name, short(getattr(exc, "code", "") or exc, 60)))
             verdict[name] = "失败"
             continue
         access = body.get("access_token", "")
@@ -394,41 +258,30 @@ def probe_scopes(client_id: str, tenant: str, refresh_token: str) -> dict:
 def call_me(access_token: str) -> bool:
     """这枚票 Graph 到底认不认——这才是真正的判据，跟它是不是 JWT 无关。"""
     section("⑤ 实调 Graph /me")
-    request = urllib.request.Request(
-        GRAPH + "/me?$select=displayName,userPrincipalName,mail",
-        headers={"Authorization": "Bearer " + access_token},
-    )
     try:
-        with _opener().open(request, timeout=30) as response:
-            body = _maybe_json(response.read().decode("utf-8", "replace"))
-        print("  HTTP {} → {} / {}".format(
-            response.status, body.get("displayName", "?"), body.get("userPrincipalName", "?")
-        ))
-        print("  ✓ 这枚票能用，日历就写到这个账号名下")
-        return True
-    except urllib.error.HTTPError as exc:
-        detail = _maybe_json(exc.read().decode("utf-8", "replace"))
-        error = detail.get("error") if isinstance(detail.get("error"), dict) else {}
-        print("  HTTP {} → {} {}".format(exc.code, error.get("code", "?"), short(error.get("message", ""), 160)))
-        if exc.code == 401:
+        body = gc.me(access_token)
+    except gc.GraphError as exc:
+        print("  ✗ {}".format(exc))
+        if getattr(exc, "code", "") == "unauthorized":
             print("  401：Graph 明确拒绝这枚票，回去查 client_id / API 权限 / signInAudience")
         return False
-    except urllib.error.URLError as exc:
-        print("  ✗ 网络错误：{}".format(exc.reason))
-        return False
+    print("  {} / {}".format(body.get("displayName", "?"), body.get("userPrincipalName", "?")))
+    print("  ✓ 这枚票能用，日历就写到这个账号名下")
+    return True
 
 
 # ---------------------------------------------------------------- 两种入口
 
 
-def run_login(args, client_id: str, scope: str, token: dict | None = None) -> int:
+def run_login(args, creds, scope: str, token: dict | None = None) -> int:
     if token is None:
-        token = device_login(client_id, args.tenant, scope)
+        try:
+            token = gc.device_login(creds, scope=scope)
+        except gc.GraphError as exc:
+            explain(exc)
+            return 2
         if not token:
             return 2
-        save_cache(client_id, args.tenant, token)
-    if not token:
-        return 2
 
     section("② 换到的票")
     print("  token_type   : {}".format(token.get("token_type", "?")))
@@ -441,7 +294,7 @@ def run_login(args, client_id: str, scope: str, token: dict | None = None) -> in
     for label in ("id_token", "access_token"):
         value = token.get(label)
         if value:
-            claims[label], verified[label] = describe(label, value, client_id)
+            claims[label], verified[label] = describe(label, value, creds.client_id)
 
     access_raw = token.get("access_token", "")
     access_jwt = bool(claims.get("access_token"))
@@ -449,7 +302,7 @@ def run_login(args, client_id: str, scope: str, token: dict | None = None) -> in
 
     # 探针必须排在提前 return 之前：access_token 不透明时正是要看它
     if args.probe_scopes:
-        verdict = probe_scopes(client_id, args.tenant, token.get("refresh_token", ""))
+        verdict = probe_scopes(creds.client_id, creds.tenant, token.get("refresh_token", ""))
         if verdict and all(value != "JWT" for value in verdict.values()):
             print("\n  · 三种写法都不是 JWT —— 个人账户下这很正常，不代表出错。")
             print("    判据是下一节：Graph 认不认这枚票。")
@@ -491,9 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="设备代码流拿微软 JWT，并解码 / 验签 / 实调 Graph。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例:\n"
-        "  python scripts/msa_jwt.py --client-id 00000000-0000-0000-0000-000000000000\n"
-        "  python scripts/msa_jwt.py --client-id <id> --probe-scopes\n"
-        "  python scripts/msa_jwt.py --token eyJ0eXAi...\n",
+        "  python scripts/graph_auth_check.py --client-id 00000000-0000-0000-0000-000000000000\n"
+        "  python scripts/graph_auth_check.py --client-id <id> --probe-scopes\n"
+        "  python scripts/graph_auth_check.py --reuse\n"
+        "  python scripts/graph_auth_check.py --token eyJ0eXAi...\n",
     )
     parser.add_argument("--client-id", default=os.environ.get("MAILER_GRAPH_CLIENT_ID", ""),
                         help="应用(客户端) ID，默认读 MAILER_GRAPH_CLIENT_ID")
@@ -502,46 +356,55 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scope", action="append", metavar="SCOPE",
                         help="可重复；默认是 Graph 完整 URI + OIDC")
     parser.add_argument("--token", metavar="JWT", help="不解码登录，只检查一枚现成的票")
-    parser.add_argument("--probe-scopes", action="store_true", help="登录后用 refresh_token 试各种 scope 写法")
+    parser.add_argument("--probe-scopes", action="store_true",
+                        help="登录后用 refresh_token 试各种 scope 写法")
     parser.add_argument("--no-call", action="store_true", help="不实调 Graph /me")
     parser.add_argument("--force-call", action="store_true",
                         help="（已废弃，现在默认就会调 Graph；留着只为兼容旧命令）")
     parser.add_argument("--reuse", action="store_true",
-                        help="复用上次登录存下的 refresh_token，不重新走设备码")
+                        help="复用缓存的 refresh_token，不重新走设备码")
     parser.add_argument("--proxy", metavar="URL", help="如 http://127.0.0.1:7890")
     return parser
 
 
 def main(argv=None) -> int:
-    if hasattr(sys.stdout, "reconfigure"):  # Windows 重定向到管道时默认 GBK，会炸
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # Windows 重定向到管道/文件时默认 GBK：✓ ✗ 之类会炸，统一成 UTF-8
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     if args.proxy:
-        set_proxy(args.proxy)
+        gc.set_proxy(args.proxy)
 
     if args.token:
         return run_token(args, args.token.strip())
 
+    scope = " ".join(args.scope) if args.scope else DEFAULT_SCOPES
+
     if args.reuse:
-        cache = load_cache()
+        cache = gc.load_token_cache()
         if not cache.get("refresh_token"):
-            print("没有可复用的缓存（{}），先正常跑一次登录".format(CACHE_PATH))
+            print("没有可复用的缓存（{}），先跑一次 --graph-login".format(gc.token_path()))
             return 2
         client_id = (args.client_id or cache.get("client_id", "")).strip()
-        args.tenant = args.tenant if args.tenant != "common" else cache.get("tenant", "common")
+        tenant = args.tenant if args.tenant != "common" else cache.get("tenant", "common")
         if not client_id:
             print("缓存里没有 client_id，请显式传 --client-id")
             return 2
-        scope = " ".join(args.scope) if args.scope else DEFAULT_SCOPES
-        token = refresh_token_login(client_id, args.tenant, scope, cache["refresh_token"])
-        return run_login(args, client_id, scope, token=token or None)
+        creds = gc.Creds(client_id, tenant, gc.token_path())
+        try:
+            token = gc.exchange_refresh_token(client_id, tenant, scope, cache["refresh_token"])
+        except gc.GraphError as exc:
+            explain(exc)
+            return 2
+        gc.store_token(creds, token)
+        return run_login(args, creds, scope, token=token or None)
 
     client_id = (args.client_id or "").strip()
     if not client_id:
         print("缺少 --client-id（或环境变量 MAILER_GRAPH_CLIENT_ID）")
         return 2
-    scope = " ".join(args.scope) if args.scope else DEFAULT_SCOPES
-    return run_login(args, client_id, scope)
+    return run_login(args, gc.Creds(client_id, args.tenant, gc.token_path()), scope)
 
 
 if __name__ == "__main__":

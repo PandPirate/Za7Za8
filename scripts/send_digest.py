@@ -6,15 +6,15 @@
     python scripts/send_digest.py --dry-run
     python scripts/send_digest.py --to you@example.com
 
-真正的实现在 scripts/mailer/ 里；这个文件只是把 scripts/ 放进 sys.path 再转交。
+实现都在 `lib/mail/` 里，`lib/graph_calendar.py` 负责写日历；这个文件只做两件事：
+把 `lib/` 加进 `sys.path`，然后转交 `mail.cli.main`。
 """
 
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _bootstrap  # noqa: F401  （必须在 import mail 之前，它负责把 lib/ 放进 sys.path）
 
-from mailer.cli import main  # noqa: E402  （要在 sys.path 处理之后导入）
+from mail.cli import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

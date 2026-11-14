@@ -7,9 +7,25 @@
 
 ```
 .
-├── docs/      文档：原理、方法、排查
-└── scripts/   可运行的脚本
+├── docs/       文档：原理、方法、排查
+├── lib/        可 import 的库：mail/（发邮件）+ graph_calendar.py（写日历）
+├── scripts/    可执行的入口：只做参数与转交，不藏实现
+├── downloads/  脚本产物：下载的文件、邮件预览、.ics（不入库）
+└── state/      机器状态与凭据：Graph token、诊断缓存（不入库）
 ```
+
+目录约定：**`scripts/` 里的文件都能直接跑，`lib/` 里的东西都是被 import 的**。
+两个领域各自独立：
+
+| 单元 | 形态 | 为什么 |
+|---|---|---|
+| `lib/mail/` | 目录包 | 发邮件真的要多个文件：插件协议、版面、SMTP 配置、CLI，还要放 plugins/ |
+| `lib/graph_calendar.py` | 单文件 | 写日历就一件事（认证 + Graph + 同步策略），合在一个文件里读着更顺 |
+| `lib/paths.py`、`lib/constants.py` | 单文件 | 两个领域都要用的小东西 |
+
+`mail` 的框架层（`core` / `template` / `config`）不知道日历的存在；只有 `cli` 为了打
+“没配 Graph”那句提示、和插件为了写日历，才 `import graph_calendar`。`downloads/` 可以
+随便删，`state/` 删了就要重新登录。
 
 ## 脚本用法
 
@@ -67,7 +83,6 @@ python scripts/pikpak_share_dl.py <链接> --no-proxy           # 忽略环境/�
 不要指望靠重试变出来。所以：**优先选标「可完整下载」的档位**；实在要原画，
 可先去下能拿到的部分（`.part` 是有效前缀，以后可续传），或过一阵再看长度会不会变长。
 详见 [`docs/pikpak-share-to-direct-link.md`](docs/pikpak-share-to-direct-link.md) 的 Step 9。
-详见 [`docs/pikpak-share-to-direct-link.md`](docs/pikpak-share-to-direct-link.md) 的 Step 9。
 
 输入形式都认：
 
@@ -109,21 +124,6 @@ python scripts/cn_holiday_ics.py --no-alarms        # 补班日不加提醒
 生成前会用通知里写明的「日期（星期）」自检一遍，抄错日期、星期对不上都会直接报错，
 所以改完数据跑一次就知道有没有抄错。
 
-### `scripts/football_ics.py`
-
-把英超 / 欧冠赛程生成 `.ics` 日历。开球时间按北京时间录入，写进 ICS 时换算成 UTC，
-导入任何客户端都不会因为时区设置差一小时。
-
-```bash
-python scripts/football_ics.py                 # 英超 + 欧冠，输出 downloads/
-python scripts/football_ics.py --only 欧冠      # 只导出一项赛事
-python scripts/football_ics.py --no-alarms     # 不加赛前 30 分钟提醒
-```
-
-数据在脚本顶部的 `MATCHES` 里维护（赛事、轮次、北京时间、主客队、场地）。生成前按
-轮次自检：每轮场数够不够、同一轮有没有球队重复出场、每队总出场次数是否一致——抄漏
-或者抄重都会直接报错。每场比赛默认 2 小时、标「忙」，并带一个赛前 30 分钟的提醒。
-
 ### `scripts/send_digest.py`
 
 可插拔的摘要邮件框架：**插件出内容，框架管版式和投递**。一个插件挂掉不会影响别的
@@ -132,7 +132,6 @@ python scripts/football_ics.py --no-alarms     # 不加赛前 30 分钟提醒
 ```bash
 python scripts/send_digest.py --list                       # 有哪些插件
 python scripts/send_digest.py --dry-run                    # 生成预览（.eml + .html），不发信
-python scripts/send_digest.py --dry-run --offline          # 不联网，用插件自带快照
 python scripts/send_digest.py --plugin premier_league      # 只跑某个插件（可重复）
 ```
 
@@ -147,22 +146,26 @@ export MAILER_TO=me@example.com
 python scripts/send_digest.py            # 真发
 ```
 
+不想每次 export，就写一个 JSON 给 `--config`（字段名和上面的环境变量一一对应）。
+这个文件里有授权码，**放 `state/`**（已 gitignore）：
+
+```bash
+python scripts/send_digest.py --config state/mail.json
+```
+
 自带的两个插件：
 
 | 插件 | 说明 |
 | --- | --- |
 | `premier_league` | 英超上一轮赛果、下一轮赛程、看点，并把赛程写进 Outlook 日历 |
-| `example` | 演示插件契约，`--plugin example` 才跑 |
+| `example` | 插件契约示例，`--plugin example` 才跑 |
 
-**邮件里只有数据，没有第三方内容。** 赛果是比分、赛程是北京时间、看点是自动算出来的
-（进球大战、焦点战），不带战报、集锦、球队新闻，也不挂附件。
+邮件里只有数据：赛果是比分，赛程是北京时间，看点是自动算出来的（进球大战、焦点战）；
+不带战报、集锦、附件。取不到实时数据时这一块整体不出现，不拿旧比分凑数。
 
-**日历只有一条落地方式：Microsoft Graph。** 邮件正文里会先排一份日历（一排日期格子，
-有比赛的日期点亮、标场次，下面按天分组），然后同一批日程通过 Graph 写进你 Outlook 里
-一个叫「英超赛程 2026-27」的日历文件夹：每场 2 小时、标「空闲」、赛前 30 分钟提醒，
-按 `subject + 开始时间` 去重，重跑只更新不重复，也不碰你别的日程。
-
-不发 `.ics` 附件，也不用 Windows 上的本机 Outlook（COM 只能桌面跑，服务器上没有）。
+**日历只走 Microsoft Graph。** 同一批日程写进 Outlook 里一个叫「英超赛程 2026-27」的
+日历文件夹：每场 2 小时、标「空闲」、赛前 30 分钟提醒，按 `subject + 开始时间` 去重，
+重跑只更新不重复，也不碰别的日程。
 
 ```bash
 python scripts/send_digest.py --dry-run                      # 预览 + 演练日历（不落库）
@@ -170,8 +173,8 @@ python scripts/send_digest.py --dry-run --apply-calendar     # 预览 + 真写�
 python scripts/send_digest.py --calendar none                # 只发内容，不碰日历
 ```
 
-`--dry-run` 默认只**演练**（正文里写「演练：将同步到 …」），加 `--apply-calendar` 才
-真的写；没配 Graph 时 `auto` 会跳过日历，并在正文里写明原因。
+`--dry-run` 默认只演练（正文里写「日历：演练，将同步 …」），加 `--apply-calendar` 才真写；
+没配 Graph 时 `auto` 会跳过日历，并在日志里说明原因。
 
 #### 配置 Graph（一次性）
 
@@ -186,10 +189,10 @@ python scripts/send_digest.py --graph-whoami       # 确认 token 属于哪个�
 python scripts/send_digest.py --dry-run --apply-calendar
 ```
 
-token 存在 `downloads/.graph_token.json`（已 gitignore，**等于密码，别外传**），过期会用
+token 存在 `state/.graph_token.json`（已 gitignore，**等于密码，别外传**），过期会用
 refresh_token 自动续；`--graph-logout` 删掉它。
 
-**加插件**就是往 `scripts/mailer/plugins/` 里丢一个模块，暴露 `PLUGIN` 对象：
+**加插件**就是往 `lib/mail/plugins/` 里丢一个模块，暴露 `PLUGIN` 对象：
 
 ```python
 from ..core import Section
@@ -200,15 +203,33 @@ class MyPlugin:
     description = "一句话说明发什么"
     enabled_by_default = False      # True 就默认进邮件
 
-    def build(self, ctx):           # ctx.now / ctx.http_json / ctx.snapshot
+    def build(self, ctx):           # ctx.now / ctx.http_json
         return Section(key=self.name, title=self.title, html="<p>hi</p>", text="hi")
 
 PLUGIN = MyPlugin()
 ```
 
 框架靠 `pkgutil` 自动发现，不用改注册表。插件里想写日历，就照英超插件那样组
-`CalendarEvent` 交给 `mailer.calendar_sync.sync()`。想定时发就挂 cron / 计划任务，
-脚本是幂等的。
+`CalendarEvent` 交给 `graph_calendar.sync()`。想定时发就挂 cron / 计划任务；
+写日历是幂等的（按 `subject + 开始时间` 去重），重复跑只更新不重复。
+
+### `scripts/graph_auth_check.py`
+
+Graph 认证自检：设备代码流拿票 → 解码验签（纯标准库 RS256）→ 实调 `/me` 验证
+这枚票到底能不能用。**取票 / 换票 / 缓存复用 `lib/graph_calendar.py`**，和
+`send_digest.py --graph-login` 是同一套实现、同一个缓存文件，不会两边漂移。
+
+```bash
+python scripts/graph_auth_check.py --client-id <应用ID>                # 登录并检查
+python scripts/graph_auth_check.py --client-id <应用ID> --probe-scopes # 同一枚 refresh_token 试几种 scope 写法
+python scripts/graph_auth_check.py --reuse                            # 复用已有缓存，不重新登录
+python scripts/graph_auth_check.py --token eyJ0eXAi...                # 只检查一枚现成的票
+python scripts/graph_auth_check.py --proxy http://127.0.0.1:7890      # 走代理
+```
+
+判据只有一个：**Graph `/me` 返回 200**。个人账户（MSA）拿到的是 `EwB…` 开头的
+不透明票，不是 JWT，但照样能用——别拿「是不是 JWT」当判据。
+退出码：`0` = Graph 接受这枚票；`1` = 被拒；`2` = 参数 / 网络 / 授权问题。
 
 ## 文档
 

@@ -22,11 +22,11 @@ class ExamplePlugin:
     def build(self, ctx):
         html = (
             '<p style="margin:0 0 8px;">这个区块来自 <code style="background:#f1f5f9;'
-            'padding:2px 6px;border-radius:4px;">mailer.plugins.example</code>。</p>'
+            'padding:2px 6px;border-radius:4px;">mail.plugins.example</code>。</p>'
             '<p style="margin:0;color:#64748b;font-size:13px;">'
             "生成时间：{:%Y-%m-%d %H:%M}（北京时间）</p>".format(ctx.now)
         )
-        text = "这个区块来自 mailer.plugins.example。\n生成时间：{:%Y-%m-%d %H:%M}".format(ctx.now)
+        text = "这个区块来自 mail.plugins.example。\n生成时间：{:%Y-%m-%d %H:%M}".format(ctx.now)
         return Section(key=self.name, title=self.title, html=html, text=text, priority=900)
 
 

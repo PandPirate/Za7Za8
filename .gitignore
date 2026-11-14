@@ -29,3 +29,6 @@ desktop.ini
 downloads/
 *.part
 *.part.bad
+
+# 机器状态 / 凭据：Graph token、诊断缓存。等于密码，绝不能入库
+state/

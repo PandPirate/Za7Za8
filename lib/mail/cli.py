@@ -3,7 +3,6 @@
 
     python scripts/send_digest.py --list                 # 看有哪些插件
     python scripts/send_digest.py --dry-run              # 只生成预览，不发信
-    python scripts/send_digest.py --dry-run --offline    # 不联网，用快照
     python scripts/send_digest.py --to me@example.com    # 真发
 """
 
@@ -16,10 +15,10 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import MailConfig, split_addresses
-from .calendar_sync import graph_ready
-from .core import CST, Context, build_message, collect, load_plugins, save_preview, send_message
-
-ROOT = Path(__file__).resolve().parents[2]
+from .core import Context, build_message, collect, load_plugins, save_preview, send_message
+from constants import CST
+from graph_calendar import graph_ready
+from paths import PREVIEW_DIR
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,7 +28,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--list", action="store_true", help="列出可用插件后退出")
     parser.add_argument("--dry-run", action="store_true", help="只生成 .eml/.html 预览，不发信")
-    parser.add_argument("--offline", action="store_true", help="不联网，插件只能用自带快照")
     parser.add_argument(
         "--plugin",
         action="append",
@@ -60,8 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _graph_auth(args) -> int:
-    """--graph-login / --graph-logout / --graph-whoami：设备代码登录，token 缓存在 downloads/.graph_token.json。"""
-    from .graph_calendar import (
+    """--graph-login / --graph-logout / --graph-whoami：设备代码登录，token 缓存在 state/.graph_token.json。"""
+    from graph_calendar import (
         GraphError,
         cache_info,
         device_login,
@@ -73,7 +71,7 @@ def _graph_auth(args) -> int:
     creds = load_creds()
     if creds is None:
         print("先设置环境变量 MAILER_GRAPH_CLIENT_ID（Azure 应用的客户端 ID）", file=sys.stderr)
-        print("注册步骤见 README 的「配置 Graph」一节", file=sys.stderr)
+        print("注册步骤见 docs/outlook-graph-calendar.md", file=sys.stderr)
         return 2
 
     if args.graph_whoami:
@@ -124,16 +122,21 @@ def _graph_auth(args) -> int:
 
 
 def main(argv=None) -> int:
+    # Windows 重定向到管道/文件时默认 GBK：中文能过但 ─ ✓ 之类会炸，统一成 UTF-8
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(message)s",
     )
 
-    plugins = load_plugins()
-
+    # 登录 / 登出 / 查账号不依赖插件，别让一个坏插件挡住 token 维护
     if args.graph_login or args.graph_logout or args.graph_whoami:
         return _graph_auth(args)
+
+    plugins = load_plugins()
 
     if args.list:
         print("可用插件 {} 个：".format(len(plugins)))
@@ -162,7 +165,6 @@ def main(argv=None) -> int:
 
     ctx = Context(
         now=datetime.now(CST),
-        offline=args.offline,
         calendar_backend=args.calendar,
         calendar_name=args.calendar_name or "",
         # 预览默认只演练，加 --apply-calendar 才真的写日历
@@ -183,7 +185,7 @@ def main(argv=None) -> int:
     message = build_message(cfg, sections, ctx.now, args.subject or None)
 
     if args.dry_run:
-        outdir = args.out or (ROOT / "downloads" / "mail_preview")
+        outdir = args.out or PREVIEW_DIR
         stem = "digest-{:%Y%m%d}".format(ctx.now)
         eml, page = save_preview(message, outdir, stem)
         print("标题：{}".format(message["Subject"]))
