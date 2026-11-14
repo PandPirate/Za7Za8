@@ -124,8 +124,9 @@ def _graph_auth(args) -> int:
 def main(argv=None) -> int:
     # Windows 重定向到管道/文件时默认 GBK：中文能过但 ─ ✓ 之类会炸，统一成 UTF-8
     for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

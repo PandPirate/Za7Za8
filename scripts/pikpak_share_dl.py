@@ -114,6 +114,7 @@ def human_size(num) -> str:
         if num < 1024 or unit == "TiB":
             return f"{num:.2f} {unit}" if unit != "B" else f"{int(num)} B"
         num /= 1024
+    return "-"        # 走不到：上面 TiB 那一轮必定 return
 
 
 def parse_link(link: str):
@@ -193,7 +194,8 @@ class PikPakShare:
     def _proxy_handlers(proxy: str):
         if proxy.startswith(("socks4", "socks5", "socks")):
             try:
-                import socks  # PySocks
+                # PySocks 是可选依赖，没装就在下面报错提示；类型检查器也看不到它
+                import socks  # type: ignore
             except ImportError:
                 raise SystemExit("使用 socks 代理需要先安装 PySocks: pip install PySocks")
             parsed = urllib.parse.urlparse(proxy)
@@ -421,7 +423,8 @@ class PikPakShare:
                 "name": name,
                 "resolution": resolution,
                 "category": category,
-                "size": int(size) if str(size or "").isdigit() else size,
+                # 走到 int() 时它一定是数字；str() 只为让类型检查器安心
+                "size": int(str(size)) if str(size or "").isdigit() else size,
                 "expire": expire,
                 "is_origin": bool(is_origin),
                 "priority": priority,

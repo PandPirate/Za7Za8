@@ -82,13 +82,13 @@ def load_plugins() -> Dict[str, Plugin]:
     import importlib
     import pkgutil
 
-    # 用 __package__ 而不是写死 "mail"：包再改名时插件发现不会默默变成 0 个
-    package = importlib.import_module(__package__ + ".plugins")
+    from . import plugins as plugins_package  # 静态导入：包改名也不会默默扫到 0 个
+
     found: Dict[str, Plugin] = {}
-    for info in pkgutil.iter_modules(package.__path__):
+    for info in pkgutil.iter_modules(plugins_package.__path__):
         if info.name.startswith("_"):
             continue
-        module = importlib.import_module("{}.{}".format(package.__name__, info.name))
+        module = importlib.import_module("{}.{}".format(plugins_package.__name__, info.name))
         plugin = getattr(module, "PLUGIN", None)
         if plugin is None:
             continue

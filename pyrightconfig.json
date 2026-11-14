@@ -1,0 +1,5 @@
+{
+  "include": ["lib", "scripts"],
+  "extraPaths": ["lib", "scripts"],
+  "pythonVersion": "3.9"
+}

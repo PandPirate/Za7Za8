@@ -27,6 +27,10 @@
 “没配 Graph”那句提示、和插件为了写日历，才 `import graph_calendar`。`downloads/` 可以
 随便删，`state/` 删了就要重新登录。
 
+`pyrightconfig.json` 不是给运行用的：`lib/` 只在**运行时**由 `scripts/_bootstrap.py`
+塞进 `sys.path`，静态分析看不到它。这份配置声明了 `extraPaths`，编辑器里
+`import graph_calendar` 才能解析并跳转到定义。
+
 ## 脚本用法
 
 ### `scripts/pikpak_share_dl.py`

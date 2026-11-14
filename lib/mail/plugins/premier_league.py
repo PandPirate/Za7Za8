@@ -126,6 +126,12 @@ def _score(side, finished: bool) -> Optional[int]:
         return None
 
 
+def _team_name(side) -> str:
+    """ESPN 的队名 → 中文；字段缺失时给空串，不让 None 漏进 Match。"""
+    raw = ((side or {}).get("team") or {}).get("displayName") or ""
+    return TEAM_CN.get(raw, raw)
+
+
 def parse_espn(payload) -> List[Match]:
     matches: List[Match] = []
     for event in payload.get("events", []):
@@ -139,8 +145,8 @@ def parse_espn(payload) -> List[Match]:
         matches.append(
             Match(
                 kickoff=dt.datetime.fromisoformat(event["date"].replace("Z", "+00:00")),
-                home=TEAM_CN.get(home["team"]["displayName"], home["team"]["displayName"]),
-                away=TEAM_CN.get(away["team"]["displayName"], away["team"]["displayName"]),
+                home=_team_name(home),
+                away=_team_name(away),
                 home_score=_score(home, finished),
                 away_score=_score(away, finished),
                 state=state,
@@ -230,8 +236,9 @@ def _label(text: str) -> str:
 def _results_table(matches: List[Match]) -> str:
     rows = []
     for match in matches:
-        home_bold = "font-weight:700;" if match.home_score > match.away_score else ""
-        away_bold = "font-weight:700;" if match.away_score > match.home_score else ""
+        # 用 or 0：未结束的比赛比分是 None，直接比较会抛 TypeError
+        home_bold = "font-weight:700;" if (match.home_score or 0) > (match.away_score or 0) else ""
+        away_bold = "font-weight:700;" if (match.away_score or 0) > (match.home_score or 0) else ""
         rows.append(
             "<tr>"
             f'<td style="padding:8px 10px 8px 0;{_LINE}color:#94a3b8;font-size:12px;'
