@@ -373,19 +373,35 @@ def whoami(creds: Optional[Creds] = None) -> Dict:
     return me(access_token(creds))
 
 
-def ensure_calendar(token: str, name: str) -> str:
-    """找到同名日历，没有就新建一个。"""
+def find_calendar(token: str, name: str) -> Optional[str]:
+    """按名字找日历文件夹；没有返回 None（**不会新建**）。"""
     listing = _call("GET", "{}/me/calendars?$select=id,name&$top=100".format(GRAPH), token)
     for item in listing.get("value", []):
         if item.get("name") == name:
             return item["id"]
+    return None
+
+
+def ensure_calendar(token: str, name: str) -> str:
+    """找到同名日历，没有就新建一个。"""
+    existing = find_calendar(token, name)
+    if existing:
+        return existing
     created = _call("POST", "{}/me/calendars".format(GRAPH), token, {"name": name})
     return created["id"]
 
 
-def _stamp(value: str) -> str:
-    """Graph 的 dateTime 带 7 位小数，统一成到分钟，方便做匹配键。"""
+def _minute(value: str) -> str:
+    """把 Graph 的 dateTime 裁到分钟（带 7 位小数）作为匹配键。
+
+    只给时间用：它会把任意字符串砍到 16 个字符，别拿它处理标题。
+    """
     return (value or "")[:16]
+
+
+def _utc(value: datetime) -> str:
+    """Graph 要的 ISO8601 UTC 写法，例如 2026-11-17T12:00:00Z。"""
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _payload(event) -> Dict:
@@ -415,16 +431,18 @@ def sync_graph(events, name: str, plan_only: bool = False) -> Dict:
     low = min(e.start for e in events).astimezone(UTC) - timedelta(days=1)
     high = max(e.end for e in events).astimezone(UTC) + timedelta(days=1)
     url = "{}/me/calendars/{}/calendarView?startDateTime={}&endDateTime={}&$select=id,subject,start&$top=200".format(
-        GRAPH, calendar_id, low.strftime("%Y-%m-%dT%H:%M:%SZ"), high.strftime("%Y-%m-%dT%H:%M:%SZ")
+        GRAPH, calendar_id, _utc(low), _utc(high)
     )
     existing = {}
     for item in _call("GET", url, token).get("value", []):
-        existing[(_stamp(item.get("subject")), _stamp(item.get("start", {}).get("dateTime")))] = item["id"]
+        # 键必须是完整 subject + 裁到分钟的开始时间：只裁时间，标题原样比
+        existing[((item.get("subject") or ""),
+                  _minute(item.get("start", {}).get("dateTime")))] = item["id"]
 
     created = updated = 0
     for event in events:
         body = _payload(event)
-        key = (event.subject, _stamp(body["start"]["dateTime"]))
+        key = (event.subject, _minute(body["start"]["dateTime"]))
         if key in existing:
             _call("PATCH", "{}/me/events/{}".format(GRAPH, existing[key]), token, body)
             updated += 1
@@ -432,6 +450,20 @@ def sync_graph(events, name: str, plan_only: bool = False) -> Dict:
             _call("POST", "{}/me/calendars/{}/events".format(GRAPH, calendar_id), token, body)
             created += 1
     return {"calendar": name, "created": created, "updated": updated}
+
+
+def list_events(calendar_id: str, start: datetime, end: datetime,
+                creds: Optional[Creds] = None) -> List[Dict]:
+    """列出某个日历在 [start, end] 窗口内的事件。核对写入结果、清理测试数据用。"""
+    url = "{}/me/calendars/{}/calendarView?startDateTime={}&endDateTime={}" \
+          "&$select=id,subject,start,end&$top=200".format(
+              GRAPH, calendar_id, _utc(start), _utc(end))
+    return _call("GET", url, access_token(creds)).get("value", [])
+
+
+def delete_event(event_id: str, creds: Optional[Creds] = None) -> None:
+    """删一条事件（进「已删除邮件」，不是永久删除）。"""
+    _call("DELETE", "{}/me/events/{}".format(GRAPH, event_id), access_token(creds))
 
 
 # ---------------------------------------------------------------- 同步策略
