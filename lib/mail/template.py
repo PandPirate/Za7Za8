@@ -51,19 +51,19 @@ def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str
         blocks.append(
             """
       <tr>
-        <td style="padding:26px 28px 6px 28px;">
+        <td style="padding:24px 20px 6px 20px;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
             <tr>
               <td width="4" style="background:#2563eb;border-radius:2px;font-size:0;line-height:0;">&nbsp;</td>
               <td style="padding-left:10px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
-                         font-size:16px;font-weight:700;color:#0f172a;letter-spacing:.02em;">{title}</td>
+                         font-size:17px;font-weight:700;color:#0f172a;letter-spacing:.02em;">{title}</td>
             </tr>
           </table>
         </td>
       </tr>
       <tr>
-        <td style="padding:12px 28px 8px 28px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
-                   font-size:14px;line-height:1.7;color:#1e293b;">
+        <td style="padding:12px 20px 8px 20px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+                   font-size:15px;line-height:1.7;color:#1e293b;">
 {body}
         </td>
       </tr>""".format(
@@ -86,17 +86,17 @@ def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str
          style="width:100%;max-width:640px;background:#ffffff;border-radius:14px;border-collapse:separate;
                 border:1px solid #e2e8f0;overflow:hidden;">
     <tr>
-      <td style="background:#0f172a;padding:24px 28px;">
+      <td style="background:#0f172a;padding:24px 20px;">
         <div style="font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:20px;
                     font-weight:700;color:#f8fafc;letter-spacing:.04em;">{brand}</div>
-        <div style="font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;
+        <div style="font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:14px;
                     color:#94a3b8;margin-top:6px;">{subtitle}</div>
       </td>
     </tr>{blocks}
     <tr>
-      <td style="padding:20px 28px 24px 28px;border-top:1px solid #eef2f7;">
-        <div style="font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;
-                    line-height:1.7;color:#94a3b8;">
+      <td style="padding:20px 20px 24px 20px;border-top:1px solid #eef2f7;">
+        <div style="font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;
+                    line-height:1.8;color:#94a3b8;">
           时间均为北京时间 · 数据以官方/赛会公布为准
         </div>
       </td>

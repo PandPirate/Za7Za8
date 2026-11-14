@@ -64,9 +64,8 @@ ROUND_DATES = (
 # 「焦点战」的判定：两队都在这个名单里
 FOCUS_TEAMS = {"利物浦", "曼联", "曼城", "阿森纳", "切尔西", "热刺", "纽卡斯尔"}
 
-_LABEL = "font-size:12px;color:#64748b;letter-spacing:.04em;margin:20px 0 6px;"
+_LABEL = "font-size:13px;color:#64748b;letter-spacing:.04em;margin:22px 0 8px;"
 _LINE = "border-bottom:1px solid #f1f5f9;"
-_TOP = "border-top:1px solid #f1f5f9;"
 
 
 @dataclass
@@ -313,22 +312,24 @@ def _results_table(matches: List[Match]) -> str:
     rows = []
     for match in matches:
         # 用 or 0：未结束的比赛比分是 None，直接比较会抛 TypeError
-        home_bold = "font-weight:700;" if (match.home_score or 0) > (match.away_score or 0) else ""
-        away_bold = "font-weight:700;" if (match.away_score or 0) > (match.home_score or 0) else ""
+        home = escape(match.home)
+        away = escape(match.away)
+        if (match.home_score or 0) > (match.away_score or 0):
+            home = '<span style="font-weight:700;">{}</span>'.format(home)
+        if (match.away_score or 0) > (match.home_score or 0):
+            away = '<span style="font-weight:700;">{}</span>'.format(away)
         rows.append(
             "<tr>"
-            f'<td style="padding:8px 10px 8px 0;{_LINE}color:#94a3b8;font-size:12px;'
-            f'white-space:nowrap;">{match.when()}</td>'
-            f'<td style="padding:8px 10px 8px 0;{_LINE}text-align:right;{home_bold}">'
-            f"{escape(match.home)}</td>"
-            f'<td style="padding:8px 0;{_LINE}text-align:center;font-weight:600;'
-            f'white-space:nowrap;color:#0f172a;">{match.home_score} - {match.away_score}</td>'
-            f'<td style="padding:8px 0 8px 10px;{_LINE}{away_bold}">{escape(match.away)}</td>'
+            f'<td style="padding:9px 10px 9px 0;{_LINE}color:#94a3b8;font-size:13px;'
+            f'white-space:nowrap;vertical-align:top;">{match.when()}</td>'
+            f'<td style="padding:9px 0;{_LINE}font-size:16px;color:#0f172a;line-height:1.6;">'
+            f'{home} <span style="font-weight:700;white-space:nowrap;">'
+            f"{match.home_score} - {match.away_score}</span> {away}</td>"
             "</tr>"
         )
     return (
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="border-collapse:collapse;font-size:14px;">' + "".join(rows) + "</table>"
+        'style="border-collapse:collapse;">' + "".join(rows) + "</table>"
     )
 
 
@@ -347,57 +348,48 @@ def _weekday(day) -> str:
 
 
 def _agenda(matches: List[Match]) -> str:
-    """按天排的赛程：左边日期，右边当天所有场次。"""
-    rows = []
+    """按天排的赛程：日期单独一行，下面列当天场次，窄屏也不会挤成两列。"""
+    blocks = []
     for day, items in _group_by_day(matches):
-        lines = "<br>".join(
-            f'<span style="color:#94a3b8;">{match.local:%H:%M}</span> {escape(match.home)} '
-            f'<span style="color:#cbd5e1;">vs</span> {escape(match.away)}'
+        lines = "".join(
+            '<div style="margin:2px 0;">'
+            f'<span style="color:#94a3b8;font-size:14px;">{match.local:%H:%M}</span> '
+            f'{escape(match.home)} <span style="color:#cbd5e1;">vs</span> {escape(match.away)}'
+            "</div>"
             for match in items
         )
-        rows.append(
-            "<tr>"
-            f'<td width="92" valign="top" style="padding:8px 12px 8px 0;{_TOP}font-size:13px;'
-            f'font-weight:600;color:#0f172a;white-space:nowrap;">'
-            f"{day.month}/{day.day} {_weekday(day)}</td>"
-            f'<td style="padding:8px 0;{_TOP}font-size:14px;line-height:1.8;color:#0f172a;">'
-            f"{lines}</td>"
-            "</tr>"
+        blocks.append(
+            '<div style="margin:0 0 14px;">'
+            f'<div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:4px;">'
+            f"{day.month}/{day.day} {_weekday(day)}</div>"
+            f'<div style="font-size:16px;line-height:1.9;color:#0f172a;">{lines}</div>'
+            "</div>"
         )
-    return (
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="border-collapse:collapse;">' + "".join(rows) + "</table>"
-    )
+    return "".join(blocks)
 
 
 def _standings_table(rows: List[Standing]) -> str:
+    """三列：排名 / 球队（战绩小字）/ 积分，窄屏也能一屏放下。"""
     head = (
         "<tr>"
-        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;"></td>'
-        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;">球队</td>'
-        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;text-align:center;">场</td>'
-        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;text-align:center;">'
-        "胜-平-负</td>"
-        f'<td style="padding:0 8px 4px 0;{_LINE}font-size:11px;color:#94a3b8;text-align:right;">净胜</td>'
-        f'<td style="padding:0 0 4px;{_LINE}font-size:11px;color:#94a3b8;text-align:right;">积分</td>'
+        f'<td style="padding:0 8px 6px 0;{_LINE}font-size:12px;color:#94a3b8;"></td>'
+        f'<td style="padding:0 8px 6px 0;{_LINE}font-size:12px;color:#94a3b8;">球队</td>'
+        f'<td style="padding:0 0 6px;{_LINE}font-size:12px;color:#94a3b8;text-align:right;">积分</td>'
         "</tr>"
     )
     body = []
     for row in rows:
+        meta = "{} 场 · {} · 净胜 {:+d}".format(row.played, row.record, row.goal_diff)
         body.append(
             "<tr>"
-            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:12px;color:#94a3b8;">'
-            f"{row.rank}</td>"
-            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:14px;color:#0f172a;">'
-            f"{escape(row.team)}</td>"
-            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:13px;color:#64748b;'
-            f'text-align:center;">{row.played}</td>'
-            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:13px;color:#64748b;'
-            f'text-align:center;white-space:nowrap;">{row.record}</td>'
-            f'<td style="padding:6px 8px 6px 0;{_LINE}font-size:13px;color:#64748b;'
-            f'text-align:right;">{row.goal_diff:+d}</td>'
-            f'<td style="padding:6px 0;{_LINE}font-size:14px;font-weight:700;'
-            f'color:#0f172a;text-align:right;">{row.points}</td>'
+            f'<td style="padding:8px 8px 8px 0;{_LINE}font-size:13px;color:#94a3b8;'
+            f'vertical-align:top;">{row.rank}</td>'
+            f'<td style="padding:8px 8px 8px 0;{_LINE}font-size:16px;color:#0f172a;'
+            f'line-height:1.4;">{escape(row.team)}'
+            f'<div style="font-size:13px;color:#94a3b8;font-weight:400;margin-top:2px;">'
+            f"{meta}</div></td>"
+            f'<td style="padding:8px 0;{_LINE}font-size:18px;font-weight:700;color:#0f172a;'
+            f'text-align:right;vertical-align:top;">{row.points}</td>'
             "</tr>"
         )
     return (
@@ -408,9 +400,13 @@ def _standings_table(rows: List[Standing]) -> str:
 
 def _bullets(items: List[str]) -> str:
     lis = "".join(
-        '<li style="margin:4px 0;color:#334155;">' + escape(item) + "</li>" for item in items
+        '<li style="margin:6px 0;color:#334155;">' + escape(item) + "</li>" for item in items
     )
-    return '<ul style="margin:2px 0 0;padding-left:18px;font-size:14px;">' + lis + "</ul>"
+    return (
+        '<ul style="margin:2px 0 0;padding-left:20px;font-size:16px;line-height:1.7;">'
+        + lis
+        + "</ul>"
+    )
 
 
 def _calendar_events(matches: List[Match], round_no: Optional[int]) -> List[CalendarEvent]:
@@ -523,7 +519,7 @@ class PremierLeaguePlugin:
         notes_html.append("数据：" + escape(source))
         notes_text.append("数据：" + source)
         html.append(
-            '<div style="margin-top:18px;font-size:12px;color:#94a3b8;line-height:1.7;">'
+            '<div style="margin-top:20px;font-size:13px;color:#94a3b8;line-height:1.8;">'
             + "<br>".join(notes_html)
             + "</div>"
         )
