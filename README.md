@@ -239,6 +239,9 @@ python scripts/send_mail.py --to a@b.com --dry-run            # 只写 .eml/.htm
   能拖进 Outlook 先看一眼，不发信。
 - 附件按扩展名猜 MIME，猜不到就用 `application/octet-stream`；`--body` 与
   `--body-file` 互斥，`-` 表示从标准输入读。
+- **投递失败不会静默**：`smtplib` 把“部分收件人被拒”当返回值而不是异常，脚本会把它
+  当失败抛出，并打印每个地址的服务端返回码；`--debug` 可看完整 SMTP 对话。
+- Message-ID 用发件人的真域名（以前写死的 `@za7za8.local` 会被部分收件方扣分）。
 
 ### `scripts/graph_auth_check.py`
 

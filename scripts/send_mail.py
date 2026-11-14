@@ -18,17 +18,18 @@ SMTP 配置和 `send_digest.py` 共用：环境变量（MAILER_SMTP_*）或 `--c
 import argparse
 import mimetypes
 import os
+import smtplib
 import sys
 from datetime import datetime
 from email.message import EmailMessage
-from email.utils import formataddr, formatdate, make_msgid
+from email.utils import format_datetime, formataddr
 from pathlib import Path
 
 import _bootstrap  # noqa: F401  （把 lib/ 放进 sys.path）
 
 from constants import CST
 from mail.config import MailConfig, split_addresses
-from mail.core import save_preview, send_message
+from mail.core import message_id, save_preview, send_message
 from paths import PREVIEW_DIR
 
 # 不写 --subject/--body 时用的默认值：这个脚本最常见的用途就是“发一封测试信”
@@ -43,15 +44,19 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def build_message(cfg, args, text: str, html: str) -> EmailMessage:
+def build_message(cfg, args, text: str, html: str, now) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = args.subject or DEFAULT_SUBJECT
     # 没配发件人时给个占位地址，别留下空尖括号（预览用）
     message["From"] = formataddr((cfg.brand, cfg.sender or "noreply@localhost"))
+    if cfg.sender:
+        message["Reply-To"] = cfg.sender
     if cfg.to:
         message["To"] = ", ".join(cfg.to)
-    message["Date"] = formatdate(localtime=False)
-    message["Message-ID"] = make_msgid(domain="za7za8.local")
+    # 必须是带时区偏移的写法（+0800）。以前用 formatdate(localtime=False) 写出 -0000，
+    # 那是「时区未知」，部分垃圾邮件过滤器会当成可疑信号
+    message["Date"] = format_datetime(now)
+    message["Message-ID"] = message_id(cfg.sender)
 
     message.set_content(text)
     if html:
@@ -103,6 +108,8 @@ def main(argv=None) -> int:
     parser.add_argument("--brand", metavar="NAME", help="覆盖发件人显示名")
     parser.add_argument("--dry-run", action="store_true",
                         help="只生成 .eml/.html 预览，不发信")
+    parser.add_argument("--debug", action="store_true",
+                        help="打印完整 SMTP 对话（看服务端对每个收件人的返回码）")
     parser.add_argument("--out", type=Path, metavar="DIR", help="预览输出目录")
     args = parser.parse_args(argv)
 
@@ -124,8 +131,8 @@ def main(argv=None) -> int:
         text = _read_text(args.body_file)
     html = _read_text(args.html) if args.html else ""
 
-    message = build_message(cfg, args, text, html)
     now = datetime.now(CST)
+    message = build_message(cfg, args, text, html, now)
 
     if args.dry_run:
         outdir = args.out or PREVIEW_DIR
@@ -142,7 +149,18 @@ def main(argv=None) -> int:
         print("先用 --dry-run 看预览，或参考 README 里的环境变量", file=sys.stderr)
         return 2
 
-    send_message(message, cfg)
+    try:
+        send_message(message, cfg, debug=args.debug)
+    except smtplib.SMTPRecipientsRefused as exc:
+        print("收件人被服务端拒收：", file=sys.stderr)
+        for addr, (code, detail) in exc.recipients.items():
+            print("  {} → {} {}".format(
+                addr, code, detail.decode("utf-8", "replace")), file=sys.stderr)
+        return 1
+    except (smtplib.SMTPException, OSError) as exc:
+        print("投递失败：{}: {}".format(type(exc).__name__, exc), file=sys.stderr)
+        return 1
+
     print("已发送：{} → {}（{} KiB 正文，{} 个附件）".format(
         message["Subject"], ", ".join(cfg.to),
         len(bytes(message)) // 1024, len(args.attach)))

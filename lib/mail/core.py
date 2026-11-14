@@ -20,7 +20,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
-from email.utils import formataddr, formatdate, make_msgid
+from email.utils import formataddr, format_datetime, make_msgid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
@@ -120,6 +120,15 @@ def default_subject(sections: Sequence[Section], now: datetime) -> str:
     return "{:%Y-%m-%d} {}".format(now, titles)
 
 
+def message_id(sender: str) -> str:
+    """Message-ID 用发件人的真域名。
+
+    以前写死的是 `@za7za8.local`——`.local` 是不存在的域名，部分收件方会因此扣分。
+    """
+    _, _, domain = (sender or "").partition("@")
+    return make_msgid(domain=domain or None)
+
+
 def build_message(
     cfg: Any,
     sections: Sequence[Section],
@@ -134,32 +143,48 @@ def build_message(
     message["From"] = formataddr((cfg.brand, cfg.sender or "noreply@localhost"))
     if cfg.to:
         message["To"] = ", ".join(cfg.to)
-    message["Date"] = formatdate(localtime=False)
-    message["Message-ID"] = make_msgid(domain="za7za8.local")
+    message["Date"] = format_datetime(now)
+    message["Message-ID"] = message_id(cfg.sender)
     message["Auto-Submitted"] = "auto-generated"
     message.set_content(text)
     message.add_alternative(html, subtype="html")
     return message
 
 
-def send_message(message: EmailMessage, cfg: Any) -> None:
+def send_message(message: EmailMessage, cfg: Any, debug: bool = False) -> None:
+    """投递。任何一个收件人被服务端拒收都会抛 SMTPRecipientsRefused。
+
+    `smtplib.SMTP.send_message()` **不会**因为部分收件人被拒而报错，它把拒绝名单当
+    返回值交回来；不检查它，就会出现「已发送里有、收件人没收到」却看不出错的情况。
+    """
     log.info("投递到 %s", cfg.masked())
     if cfg.tls == "ssl":
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=30, context=context) as smtp:
+            if debug:
+                smtp.set_debuglevel(1)
             if cfg.user:
                 smtp.login(cfg.user, cfg.password)
-            smtp.send_message(message)
+            _deliver(smtp, message)
         return
 
     with smtplib.SMTP(cfg.host, cfg.port, timeout=30) as smtp:
+        if debug:
+            smtp.set_debuglevel(1)
         smtp.ehlo()
         if cfg.tls == "starttls":
             smtp.starttls(context=ssl.create_default_context())
             smtp.ehlo()
         if cfg.user:
             smtp.login(cfg.user, cfg.password)
-        smtp.send_message(message)
+        _deliver(smtp, message)
+
+
+def _deliver(smtp, message: EmailMessage) -> None:
+    """把「有收件人被拒」当成失败报出来，而不是默默当成功。"""
+    refused = smtp.send_message(message)
+    if refused:
+        raise smtplib.SMTPRecipientsRefused(refused)
 
 
 def save_preview(message: EmailMessage, outdir: Path, stem: str = "digest") -> "tuple[Path, Path]":
