@@ -161,15 +161,15 @@ python scripts/send_digest.py --config state/mail.json
 
 | 插件 | 说明 |
 | --- | --- |
-| `premier_league` | 英超上一轮赛果、下一轮赛程、看点，并把赛程写进 Outlook 日历 |
+| `premier_league` | 英超上一轮赛果、积分榜、下一轮赛程、看点，并把赛程写进 Outlook 日历 |
 | `example` | 插件契约示例，`--plugin example` 才跑 |
 
 邮件里只有数据：赛果是比分，赛程是北京时间，看点是自动算出来的（进球大战、焦点战）；
 不带战报、集锦、附件。取不到实时数据时这一块整体不出现，不拿旧比分凑数。
 
 **日历只走 Microsoft Graph。** 同一批日程写进 Outlook 里一个叫「英超赛程 2026-27」的
-日历文件夹：每场 2 小时、标「空闲」、赛前 30 分钟提醒，按 `subject + 开始时间` 去重，
-重跑只更新不重复，也不碰别的日程。
+日历文件夹：每场 2 小时、标「空闲」、赛前 30 分钟提醒，按 `subject + 开始时间` 去重：
+重跑只更新不重复；日历里若已有同键副本，只保留一条并删掉多余的，也不碰别的日程。
 
 ```bash
 python scripts/send_digest.py --dry-run                      # 预览 + 演练日历（不落库）
@@ -215,7 +215,25 @@ PLUGIN = MyPlugin()
 
 框架靠 `pkgutil` 自动发现，不用改注册表。插件里想写日历，就照英超插件那样组
 `CalendarEvent` 交给 `graph_calendar.sync()`。想定时发就挂 cron / 计划任务；
-写日历是幂等的（按 `subject + 开始时间` 去重），重复跑只更新不重复。
+写日历是幂等的（按 `subject + 开始时间` 去重，并清理已有的同键副本），
+重复跑只更新不重复。
+
+### `scripts/send_premier_league.py`
+
+`send_digest.py` 的单插件快捷方式：只发英超快报，并把下一轮赛程写进 Outlook 日历。
+等价于 `send_digest.py --plugin premier_league --calendar graph`，其余参数原样转交。
+
+```bash
+python scripts/send_premier_league.py --dry-run   # 预览邮件 + 演练日历（不落库）
+python scripts/send_premier_league.py             # 真发信 + 真写日历
+python scripts/send_premier_league.py --to me@example.com
+python scripts/send_premier_league.py --dry-run --apply-calendar   # 预览的同时真写日历
+```
+
+自己写了 `--plugin` / `--calendar` 就按自己的来（例如 `--calendar none` 只发信）；
+`--graph-login`、`--config` 这些也都能直接传给它。SMTP 与 Graph 的首次配置见上一节。
+写日历是幂等的：按 `subject + 开始时间` 去重，重复跑只更新，日历里已有的同键副本
+会被清理，只用一条。
 
 ### `scripts/send_mail.py`
 
@@ -263,7 +281,8 @@ python scripts/graph_auth_check.py --proxy http://127.0.0.1:7890      # 走代�
 
 ### `scripts/graph_calendar_test.py`
 
-写日历的自检：建测试日历 → 写 3 条事件 → 验证幂等 → 对比标题/时间 → 清理。
+写日历的自检：建测试日历 → 清场 → 写 3 条事件 → 验证幂等 → 故意造一条
+副本验证清理 → 对比标题/时间 → 收尾清理。
 
 ```bash
 python scripts/graph_calendar_test.py --dry-run   # 只读演练：不往日历写事件
