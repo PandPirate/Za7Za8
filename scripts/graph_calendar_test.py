@@ -9,7 +9,7 @@
 前提：`MAILER_GRAPH_CLIENT_ID` 已设置，且跑过
 `python scripts/send_digest.py --graph-login`（token 在 `state/.graph_token.json`）。
 
-安全边界：只动独立的「Za7Za8 测试」日历，事件标题一律以 `[测试]` 开头，
+安全边界：只动独立的 `Automation/Za7Za8 测试` 日历，事件标题一律以 `[测试]` 开头，
 清理时也只删这些——不会碰你已有的日程。
 """
 

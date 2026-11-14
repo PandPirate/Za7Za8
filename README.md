@@ -167,9 +167,14 @@ python scripts/send_digest.py --config state/mail.json
 邮件里只有数据：赛果是比分，赛程是北京时间，看点是自动算出来的（进球大战、焦点战）；
 不带战报、集锦、附件。取不到实时数据时这一块整体不出现，不拿旧比分凑数。
 
-**日历只走 Microsoft Graph。** 同一批日程写进 Outlook 里一个叫「英超赛程 2026-27」的
-日历文件夹：每场 2 小时、标「空闲」、赛前 30 分钟提醒，按 `subject + 开始时间` 去重：
-重跑只更新不重复；日历里若已有同键副本，只保留一条并删掉多余的，也不碰别的日程。
+**日历只走 Microsoft Graph。** 同一批日程写进 Outlook 的 `Automation/英超赛程 2026-27`
+（`Automation` 是日历组，相当于目录）：每场 2 小时、标「空闲」、赛前 30 分钟提醒，
+按 `subject + 开始时间` 去重：重跑只更新不重复；日历里若已有同键副本，只保留一条并
+删掉多余的，也不碰别的日程。
+
+日历组不存在会自动创建（默认 `Automation`，可用 `MAILER_CALENDAR_GROUP` 改）。如果同名
+日历已经在别的组里，Graph 没有“移动日历”接口，工具会把旧日历先改名、在目标组用原名
+新建、复制全部事件，再删旧日历；中途失败会回滚，事件不会丢。
 
 ```bash
 python scripts/send_digest.py --dry-run                      # 预览 + 演练日历（不落库）
@@ -290,7 +295,7 @@ python scripts/graph_calendar_test.py             # 真写一遍，跑完自动�
 python scripts/graph_calendar_test.py --keep      # 写完保留，方便去 Outlook 里看
 ```
 
-只动独立的「Za7Za8 测试」日历，事件标题一律 `[测试]` 开头，清理也只删这些。
+只动独立的 `Automation/Za7Za8 测试` 日历，事件标题一律 `[测试]` 开头，清理也只删这些。
 它能抓到“去重键不对导致重复建事件”这类问题——开发时就靠它发现 `sync_graph`
 把标题当成时间戳截断的 bug。
 

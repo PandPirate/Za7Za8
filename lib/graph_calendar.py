@@ -11,7 +11,7 @@
 本模块同时管三件事，都不依赖邮件那一侧：
 
     认证     设备码登录 / refresh 换票 / token 缓存（state/）
-    Graph    /me、建日历文件夹、批量写事件
+    Graph    /me、建日历组 / 日历、批量写事件
     同步策略  sync() 的 auto / graph / none 与演练（plan_only）
 
 调试入口：`python scripts/graph_auth_check.py`（验票）与 `python scripts/send_digest.py --graph-login`。
@@ -46,6 +46,8 @@ AUTHORITY = "https://login.microsoftonline.com/{tenant}"
 SCOPES = os.environ.get("MAILER_GRAPH_SCOPE") or "offline_access Calendars.ReadWrite"
 # token 本身就是密码：放 state/（已 gitignore），不要混在 downloads/ 里
 DEFAULT_TOKEN = STATE_DIR / ".graph_token.json"
+# 工具建的日历统一放在这个日历组（Outlook 里的目录）下；可用环境变量覆盖
+CALENDAR_GROUP = os.environ.get("MAILER_CALENDAR_GROUP") or "Automation"
 
 
 class GraphError(RuntimeError):
@@ -373,21 +375,153 @@ def whoami(creds: Optional[Creds] = None) -> Dict:
     return me(access_token(creds))
 
 
+def _find_calendar_item(token: str, name: str) -> Optional[Dict]:
+    """按名字找日历，返回完整对象（含 isDefaultCalendar），没找到返回 None。"""
+    listing = _call(
+        "GET",
+        "{}/me/calendars?$select=id,name,isDefaultCalendar&$top=100".format(GRAPH),
+        token,
+    )
+    for item in listing.get("value", []):
+        if item.get("name") == name:
+            return item
+    return None
+
+
 def find_calendar(token: str, name: str) -> Optional[str]:
     """按名字找日历文件夹；没有返回 None（**不会新建**）。"""
-    listing = _call("GET", "{}/me/calendars?$select=id,name&$top=100".format(GRAPH), token)
+    item = _find_calendar_item(token, name)
+    return item["id"] if item else None
+
+
+def find_calendar_group(token: str, name: str) -> Optional[str]:
+    """按名字找日历组（Outlook 的「目录」）；没有返回 None。"""
+    listing = _call(
+        "GET",
+        "{}/me/calendarGroups?$select=id,name&$top=100".format(GRAPH),
+        token,
+    )
     for item in listing.get("value", []):
         if item.get("name") == name:
             return item["id"]
     return None
 
 
-def ensure_calendar(token: str, name: str) -> str:
-    """找到同名日历，没有就新建一个。"""
-    existing = find_calendar(token, name)
+def ensure_calendar_group(token: str, name: str) -> str:
+    """找到同名日历组，没有就新建一个。"""
+    existing = find_calendar_group(token, name)
     if existing:
         return existing
-    created = _call("POST", "{}/me/calendars".format(GRAPH), token, {"name": name})
+    created = _call("POST", "{}/me/calendarGroups".format(GRAPH), token, {"name": name})
+    return created["id"]
+
+
+def _group_calendars(token: str, group_id: str) -> List[Dict]:
+    listing = _call(
+        "GET",
+        "{}/me/calendarGroups/{}/calendars?$select=id,name&$top=100".format(GRAPH, group_id),
+        token,
+    )
+    return listing.get("value", [])
+
+
+def _copy_events(token: str, source_id: str, target_id: str) -> int:
+    """把旧日历里的事件原样复制到新日历，返回复制的条数。"""
+    url = (
+        "{}/me/calendars/{}/events"
+        "?$select=subject,body,start,end,location,isReminderOn,"
+        "reminderMinutesBeforeStart,showAs&$top=200".format(GRAPH, source_id)
+    )
+    target = "{}/me/calendars/{}/events".format(GRAPH, target_id)
+    copied = 0
+    while url:
+        data = _call("GET", url, token)
+        for item in data.get("value", []):
+            _call(
+                "POST",
+                target,
+                token,
+                {
+                    "subject": item.get("subject") or "",
+                    "body": item.get("body") or {"contentType": "text", "content": ""},
+                    "start": item.get("start") or {},
+                    "end": item.get("end") or {},
+                    "location": item.get("location") or {"displayName": ""},
+                    "isReminderOn": bool(item.get("isReminderOn", True)),
+                    "reminderMinutesBeforeStart": item.get("reminderMinutesBeforeStart", 30),
+                    "showAs": item.get("showAs", "free"),
+                },
+            )
+            copied += 1
+        url = data.get("@odata.nextLink") or ""
+    return copied
+
+
+def _rename_calendar(token: str, calendar_id: str, name: str) -> None:
+    _call("PATCH", "{}/me/calendars/{}".format(GRAPH, calendar_id), token, {"name": name})
+
+
+def _migrate_calendar(
+    token: str, name: str, old_id: str, group: str, group_id: str
+) -> str:
+    """Graph 没有「移动日历」动作：改旧名 → 新组建原名 → 复制事件 → 删旧。
+
+    Graph 不允许同名日历共存，所以必须先给旧日历腾出名字；
+    中途失败就删掉新日历、把旧名字改回去，保证不丢数据。
+    """
+    backup = "{} (迁移中 {})".format(name, int(time.time()))
+    _rename_calendar(token, old_id, backup)
+    new_id = ""
+    try:
+        created = _call(
+            "POST",
+            "{}/me/calendarGroups/{}/calendars".format(GRAPH, group_id),
+            token,
+            {"name": name},
+        )
+        new_id = created["id"]
+        copied = _copy_events(token, old_id, new_id)
+    except Exception:
+        if new_id:
+            try:
+                _call("DELETE", "{}/me/calendars/{}".format(GRAPH, new_id), token)
+            except Exception:
+                log.warning("清理未完成的新日历失败：%s", new_id)
+        try:
+            _rename_calendar(token, old_id, name)
+        except Exception as exc:
+            log.warning("旧日历改回原名失败（现在叫「%s」）：%s", backup, exc)
+        raise
+    try:
+        _call("DELETE", "{}/me/calendars/{}".format(GRAPH, old_id), token)
+    except Exception as exc:
+        log.warning("旧日历已改名为「%s」但删除失败，可在 Outlook 里手动删除：%s", backup, exc)
+    log.info("已把日历「%s」迁移到「%s」，复制 %d 条事件", name, group, copied)
+    return new_id
+
+
+def ensure_calendar(token: str, name: str, group: str = CALENDAR_GROUP) -> str:
+    """找到同名日历，没有就在 group 下发新建一个。
+
+    已有日历在别的组时，用「复制事件 + 删旧日历」迁移过去（Graph 没有移动接口）；
+    默认日历不动，避免误删。
+    """
+    group_id = ensure_calendar_group(token, group)
+    for item in _group_calendars(token, group_id):
+        if item.get("name") == name:
+            return item["id"]
+    item = _find_calendar_item(token, name)
+    if item is not None:
+        if item.get("isDefaultCalendar"):
+            log.warning("「%s」是默认日历，无法迁移到「%s」", name, group)
+            return item["id"]
+        return _migrate_calendar(token, name, item["id"], group, group_id)
+    created = _call(
+        "POST",
+        "{}/me/calendarGroups/{}/calendars".format(GRAPH, group_id),
+        token,
+        {"name": name},
+    )
     return created["id"]
 
 
