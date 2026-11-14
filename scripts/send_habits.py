@@ -41,6 +41,8 @@ def _with_defaults(argv, day: str):
         config = STATE_DIR / "mail.json"
         if config.exists():
             defaults += ["--config", str(config)]
+    if not _given("--brand", argv):
+        defaults += ["--brand", habit_tracker.SUBJECT]
     return defaults + argv
 
 

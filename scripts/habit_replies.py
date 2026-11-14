@@ -71,6 +71,8 @@ def main(argv=None) -> int:
     )
 
     cfg = MailConfig.load(args.config or _default_config())
+    # 习惯邮件不显示通用发件品牌（HPLINUX-Za7Za8）
+    cfg.brand = habit_tracker.SUBJECT
     # state/mail.json 里可能只配了 SMTP，没有 to；用每日邮件同样的收件人兜底
     if not cfg.to:
         cfg.to = [DEFAULT_TO]
@@ -127,6 +129,12 @@ def main(argv=None) -> int:
             if message is None:
                 continue
             body = inbox.body_text(message)
+            if len(body) > 200_000:
+                print(
+                    "跳过过大的回复（{} 字符）：{}".format(len(body), subject),
+                    file=sys.stderr,
+                )
+                continue
             commands, errors = habit_tracker.parse_commands(body)
 
             if args.dry_run:
@@ -144,7 +152,10 @@ def main(argv=None) -> int:
                 key="habit", title=habit_tracker.SUBJECT, html=html, text=text, priority=30
             )
             reply = build_message(
-                cfg, [section], datetime.now(CST), inbox.reply_subject(subject)
+                cfg,
+                [section],
+                datetime.now(CST),
+                inbox.reply_subject(subject, habit_tracker.SUBJECT),
             )
             reply["In-Reply-To"] = message_id
             refs = " ".join(

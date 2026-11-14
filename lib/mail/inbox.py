@@ -11,6 +11,7 @@ import email
 import email.policy
 import hashlib
 import re
+import ssl
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import parseaddr, parsedate_to_datetime
@@ -38,7 +39,9 @@ def connect(cfg: MailConfig):
         raise RuntimeError("没配 IMAP 主机：设置 MAILER_IMAP_HOST，或用 smtp.* 主机名自动推导")
     if not cfg.user or not cfg.password:
         raise RuntimeError("IMAP 登录需要 MAILER_SMTP_USER / MAILER_SMTP_PASS")
-    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+    conn = imaplib.IMAP4_SSL(
+        cfg.imap_host, cfg.imap_port, ssl_context=ssl.create_default_context()
+    )
     conn.login(cfg.user, cfg.password)
     return conn
 
@@ -102,7 +105,7 @@ def mark_seen(conn, uid: bytes) -> None:
 
 
 def subject(msg: EmailMessage) -> str:
-    return str(msg.get("Subject") or "").strip()
+    return re.sub(r"[\r\n]+", " ", str(msg.get("Subject") or "")).strip()
 
 
 def from_addr(msg: EmailMessage) -> str:
@@ -110,14 +113,14 @@ def from_addr(msg: EmailMessage) -> str:
 
 
 def message_id(msg: EmailMessage) -> str:
-    value = str(msg.get("Message-ID") or "").strip()
+    value = re.sub(r"[\r\n]+", "", str(msg.get("Message-ID") or "")).strip()
     if value:
         return value
     return "<sha1-{}@local>".format(hashlib.sha1(msg.as_bytes()).hexdigest())
 
 
 def references(msg: EmailMessage) -> str:
-    return str(msg.get("References") or "").strip()
+    return re.sub(r"[\r\n]+", " ", str(msg.get("References") or "")).strip()
 
 
 def received_at(msg: EmailMessage) -> str:
@@ -135,9 +138,10 @@ def received_day(msg: EmailMessage) -> str:
     return received_at(msg)[:10]
 
 
-def reply_subject(value: str) -> str:
-    base = re.sub(r"^\s*((Re|RE|回复)\s*[:：]\s*)+", "", value or "").strip()
-    return "Re: " + (base or "习惯打卡")
+def reply_subject(value: str, fallback: str = "回复") -> str:
+    base = re.sub(r"[\r\n]+", " ", value or "")
+    base = re.sub(r"^\s*((Re|RE|回复)\s*[:：]\s*)+", "", base).strip()
+    return "Re: " + (base[:200] or fallback)
 
 
 class _TextExtractor(HTMLParser):

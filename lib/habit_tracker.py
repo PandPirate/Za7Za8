@@ -66,6 +66,7 @@ _IGNORE_PREFIX = (
     "当前没有待办",
     "没完成的必须写原因",
     "所有待办",
+    "P=完成",
 )
 _STATUS_MARKS = ("✅", "❌", "➕", "🗑", "ℹ", "⚠", "⏳")
 
@@ -244,16 +245,20 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
             commands.append(Command("all_done", line=line))
             continue
 
-        match = re.match(r"^(完成|打卡)\s*[:：]?\s*(.+)$", line)
+        match = re.match(
+            r"^(?:PASS|P|DONE|完成|打卡)\s*[:：]?\s*(.+)$", line, re.I
+        )
         if match:
-            numbers = _numbers(match.group(2))
+            numbers = _numbers(match.group(1))
             if numbers:
                 commands.append(Command("done", numbers=numbers, line=line))
             else:
                 errors.append("「{}」没写编号".format(line))
             continue
 
-        match = re.match(r"^未完成\s*[:：]?\s*(.+)$", line)
+        match = re.match(
+            r"^(?:FAIL|F|未完成|没完成)\s*[:：]?\s*(.+)$", line, re.I
+        )
         if match:
             rest = match.group(1)
             number_match = re.match(r"^([\d\s,，、]+)\s*(.*)$", rest)
@@ -266,7 +271,7 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
                 errors.append("「{}」没写编号".format(line))
             elif not reason:
                 errors.append(
-                    "未完成 {} 需要写原因，例如：未完成 {} 加班".format(
+                    "F {} 需要写原因，例如：F {} 加班".format(
                         numbers[0], numbers[0]
                     )
                 )
@@ -276,7 +281,9 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
                 )
             continue
 
-        match = re.match(r"^删除\s*[:：]?\s*(.+)$", line)
+        match = re.match(
+            r"^(?:DELETE|DEL|D|删除)\s*[:：]?\s*(.+)$", line, re.I
+        )
         if match:
             numbers = _numbers(match.group(1))
             if numbers:
@@ -285,11 +292,16 @@ def parse_commands(text: str) -> Tuple[List[Command], List[str]]:
                 errors.append("「{}」没写编号".format(line))
             continue
 
-        match = re.match(r"^新增\s*[:：]?\s*(.+)$", line)
+        match = re.match(r"^(?:ADD|A|新增|添加)\s*[:：]?\s*(.+)$", line, re.I)
         if match:
-            title = match.group(1).strip()
-            if title:
-                commands.append(Command("add", title=title, line=line))
+            titles = [
+                part.strip()
+                for part in re.split(r"[;；,，]", match.group(1))
+                if part.strip()
+            ]
+            if titles:
+                for title in titles:
+                    commands.append(Command("add", title=title, line=line))
             else:
                 errors.append("「{}」没写待办名称".format(line))
             continue
@@ -449,11 +461,12 @@ def _template_html() -> str:
         '<div style="margin-top:18px;padding:12px 14px;background:#f8fafc;'
         'border:1px solid #e2e8f0;border-radius:8px;font-family:ui-monospace,'
         "Menlo,Consolas,monospace;font-size:14px;line-height:1.9;color:#334155;\">"
-        "回复格式（只改数字/补原因，保留关键词）：<br>"
-        "完成 &lt;编号&gt;<br>"
-        "未完成 &lt;编号&gt; &lt;原因&gt;<br>"
-        "新增 &lt;每日待办&gt;<br>"
-        "删除 &lt;编号&gt;"
+        '<div style="font-weight:700;color:#0f172a;margin-bottom:4px;">'
+        "P=完成 · F=未完成（写原因） · A=新增 · D=删除</div>"
+        "P &lt;编号...&gt;<br>"
+        "F &lt;编号...&gt; &lt;原因&gt;<br>"
+        "A &lt;每日待办，多个用分号&gt;<br>"
+        "D &lt;编号...&gt;"
         "</div>"
     )
 
@@ -461,11 +474,11 @@ def _template_html() -> str:
 def _template_text() -> str:
     return "\n".join(
         (
-            "回复格式（只改数字/补原因，保留关键词）：",
-            "完成 <编号>",
-            "未完成 <编号> <原因>",
-            "新增 <每日待办>",
-            "删除 <编号>",
+            "P=完成  F=未完成（写原因）  A=新增  D=删除",
+            "P <编号...>",
+            "F <编号...> <原因>",
+            "A <每日待办，多个用分号>",
+            "D <编号...>",
         )
     )
 
@@ -512,7 +525,10 @@ def render_daily(day: str, rows: List[HabitRow]) -> Tuple[str, str]:
         )
         text_rows = "今天还没有待办。回复：新增 阅读 30 分钟"
 
-    note = "没完成的必须写原因；没提到的会继续显示为未回复。"
+    note = (
+        "P/F/D 可接多个编号；A 多个用分号。"
+        "没完成的必须写原因；没提到的会继续显示为未回复。"
+    )
     html = (
         _header(day, "今日待办")
         + html_rows
@@ -564,9 +580,9 @@ def render_summary(day: str, result: ReplyResult, rows: List[HabitRow]) -> Tuple
         changes_text.append("ℹ 提示：" + "、".join(result.notes))
     if result.errors:
         changes_html.append(
-            "⚠ 没看懂：" + "；".join(escape(item) for item in result.errors)
+            "⚠ 回复格式有问题：" + "；".join(escape(item) for item in result.errors)
         )
-        changes_text.append("⚠ 没看懂：" + "；".join(result.errors))
+        changes_text.append("⚠ 回复格式有问题：" + "；".join(result.errors))
 
     if rows:
         rows_html = "".join(
@@ -602,23 +618,32 @@ def render_summary(day: str, result: ReplyResult, rows: List[HabitRow]) -> Tuple
         + "<br>".join(changes_html or ["（本次没有识别到有效变更）"])
         + "</div>"
     )
+    help_html = ""
+    help_text = ""
+    if result.errors:
+        help_html = (
+            '<div style="margin-top:12px;font-size:13px;color:#9a3412;">'
+            "格式有问题的行已忽略，请按下面格式重新回复。</div>"
+        )
+        help_text = "格式有问题的行已忽略，请按下面格式重新回复。"
     html = (
         _header(day, "打卡结果")
         + changes_block
         + '<div style="font-size:13px;color:#64748b;letter-spacing:.04em;'
         'margin:20px 0 6px;">所有待办</div>'
         + rows_html
+        + help_html
         + _template_html()
     )
-    text = "\n".join(
-        (
-            "打卡结果 · {}".format(date_label(day)),
-            "\n".join(changes_text or ["（本次没有识别到有效变更）"]),
-            "",
-            "所有待办",
-            rows_text,
-            "",
-            _template_text(),
-        )
-    )
+    text_parts = [
+        "打卡结果 · {}".format(date_label(day)),
+        "\n".join(changes_text or ["（本次没有识别到有效变更）"]),
+        "",
+        "所有待办",
+        rows_text,
+    ]
+    if help_text:
+        text_parts += ["", help_text]
+    text_parts += ["", _template_text()]
+    text = "\n".join(text_parts)
     return html, text
