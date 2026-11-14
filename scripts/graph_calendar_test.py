@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Graph 日历写入自检：建测试日历 → 写事件 → 验证幂等 → 清理。
 
-    python scripts/graph_calendar_test.py --dry-run   # 只演练，不改任何东西
+    python scripts/graph_calendar_test.py --dry-run   # 只读演练：不往日历写事件
     python scripts/graph_calendar_test.py             # 真写一遍，跑完自动清理
     python scripts/graph_calendar_test.py --keep      # 写完保留，方便去 Outlook 里看
 
@@ -59,13 +59,14 @@ def main(argv=None) -> int:
         description="写一遍 Outlook 日历并验证结果（默认自动清理测试事件）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例:\n"
-        "  %(prog)s --dry-run        # 只演练\n"
+        "  %(prog)s --dry-run        # 只读演练，不写事件\n"
         "  %(prog)s                  # 真写 + 验证 + 清理\n"
         "  %(prog)s --keep           # 写完保留\n",
     )
     parser.add_argument("--calendar", default=DEFAULT_CALENDAR, metavar="NAME",
                         help="写入哪个日历，默认「{}」".format(DEFAULT_CALENDAR))
-    parser.add_argument("--dry-run", action="store_true", help="只演练，不写任何东西")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="只读演练：不往日历写事件（仍会读日历、可能续期 token）")
     parser.add_argument("--keep", action="store_true", help="写完不清理，方便去 Outlook 里看")
     parser.add_argument("--offset-days", type=int, default=3, metavar="N",
                         help="测试事件放在几天后（默认 3）")
@@ -118,7 +119,7 @@ def main(argv=None) -> int:
             print("  [新建] 日历还不存在，真跑时会自动创建「{}」".format(args.calendar))
         planned = gc.sync(events, args.calendar, backend="graph", plan_only=True)
         check("演练", planned.created == len(events), planned.line())
-        print("\n演练结束：没有写任何东西。去掉 --dry-run 就是真写。")
+        print("\n演练结束：没有往日历写任何事件（去掉 --dry-run 就是真写）。")
         return 1 if failures else 0
 
     try:
