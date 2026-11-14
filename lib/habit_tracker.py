@@ -23,6 +23,8 @@ from paths import STATE_DIR
 DB_PATH = Path(os.environ.get("MAILER_HABIT_DB") or (STATE_DIR / "habits.db"))
 WEEKDAY_CN = "一二三四五六日"
 SUBJECT = "21天习惯养成"
+# 过了当天还没回复的打卡，次日自动标成未完成，原因写这个
+EXPIRED_REASON = "当日未回复"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS habits (
@@ -188,6 +190,26 @@ def ensure_day(day: str, db_path: Optional[Path] = None) -> List[HabitRow]:
 def day_rows(day: str, db_path: Optional[Path] = None) -> List[HabitRow]:
     with _db(db_path) as conn:
         return _rows(conn, day)
+
+
+def close_overdue(
+    today: str, reason: str = EXPIRED_REASON, db_path: Optional[Path] = None
+) -> int:
+    """把 today 之前还停在 pending 的打卡标成 missed，返回条数。
+
+    日报一天只发一封，用户不回复那条 pending 就永远停在那里；过了当天它就不再
+    是「还没到截止时间」，而是「当天没完成」。不区分开，连续天数和完成率都会算错。
+
+    只动 `day < today` 的行：今天还没过完，pending 是正常状态。
+    用户事后补回复时会再次更新这些行，迟到的「完成」仍然算数。
+    """
+    with _db(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE checkins SET status='missed', reason=?, updated_at=? "
+            "WHERE day < ? AND status='pending'",
+            (reason, _now(), today),
+        )
+        return int(cur.rowcount or 0)
 
 
 def add_habit(title: str, day: str, db_path: Optional[Path] = None) -> int:

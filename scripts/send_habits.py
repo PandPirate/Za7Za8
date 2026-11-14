@@ -60,6 +60,12 @@ def main(argv=None) -> int:
         print("{} 已经发过习惯打卡邮件，跳过".format(day))
         return 0
 
+    if not dry_run:
+        # 发新的一天之前，把从前没回复的 pending 收尾成「未完成」
+        closed = habit_tracker.close_overdue(day)
+        if closed:
+            print("已把 {} 条超时未回复的打卡标为未完成".format(closed))
+
     status = digest_main(_with_defaults(args, day))
     if status == 0 and not dry_run:
         habit_tracker.mark_sent(day)

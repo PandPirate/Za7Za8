@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import smtplib
 import ssl
 import urllib.request
@@ -22,7 +23,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr, format_datetime, make_msgid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Sequence
+from typing import Any, Dict, List, Optional, Protocol, Sequence, cast
 
 from . import __version__
 from .template import render_document
@@ -127,6 +128,46 @@ def message_id(sender: str) -> str:
     """
     _, _, domain = (sender or "").partition("@")
     return make_msgid(domain=domain or None)
+
+
+class _RawHeader:
+    """原样输出的头部：不折行、不做 RFC 2047 编码。"""
+
+    def __init__(self, name: str, value: str) -> None:
+        self.name = name
+        self.value = value
+
+    def fold(self, *, policy: Any = None) -> str:
+        # 和 email 包的约定一致：fold() 的返回值要自带行尾
+        linesep = getattr(policy, "linesep", "\n")
+        return "{}: {}{}".format(self.name, self.value, linesep)
+
+
+def set_raw_header(message: EmailMessage, name: str, value: str) -> None:
+    """写入一个必须原样发送的头部。
+
+    `In-Reply-To` / `References` 装的是 Message-ID，必须一字不改地出现在收件方
+    眼里。但 email 包把它们当「无结构文本」：遇到 100 多字符的 id（Outlook 生成的
+    都这么长）又找不到空格可折行，就会 RFC 2047 编码成 `=?utf-8?q?...?=` —— 那已
+    经不是 Message-ID 了，对方解析不出来，会话就断在这里。
+
+    `EmailPolicy.fold()` 只要求对象带 `name` 属性和 `fold(policy=...)` 方法，所以
+    直接换成一个自定义对象即可。写入前统一清掉换行，避免头部注入。
+    """
+    clean = re.sub(r"[\r\n]+", " ", value or "").strip()
+    if not clean:
+        return
+    raw = _RawHeader(name, clean)
+    # EmailMessage 没有公开「原样写入头部」的接口，_headers 是唯一的入口；
+    # typeshed 也没暴露它，所以这里用 getattr + cast 取到内部列表。
+    headers = cast(List[Any], getattr(message, "_headers", None))
+    if headers is None:
+        return
+    for index, (key, _) in enumerate(headers):
+        if str(key).lower() == name.lower():
+            headers[index] = (key, raw)
+            return
+    headers.append((name, raw))
 
 
 def build_message(

@@ -19,6 +19,7 @@ from html.parser import HTMLParser
 from typing import List, Optional
 
 from .config import MailConfig
+from .core import set_raw_header
 
 _MONTHS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -80,7 +81,9 @@ def search_recent(
 def fetch_headers(conn, uid: bytes) -> Optional[EmailMessage]:
     """只取头部，用来过滤主题/发件人；比拉整封邮件快得多。"""
     status, parts = conn.fetch(
-        uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID REFERENCES)])"
+        uid,
+        "(BODY.PEEK[HEADER.FIELDS "
+        "(SUBJECT FROM DATE MESSAGE-ID REFERENCES THREAD-INDEX THREAD-TOPIC)])",
     )
     if status != "OK":
         return None
@@ -121,6 +124,48 @@ def message_id(msg: EmailMessage) -> str:
 
 def references(msg: EmailMessage) -> str:
     return re.sub(r"[\r\n]+", " ", str(msg.get("References") or "")).strip()
+
+
+def _header(msg: EmailMessage, name: str, limit: int) -> str:
+    """取单个头部：去掉换行、压成一行、截断，避免把用户内容原样塞回去。"""
+    value = re.sub(r"[\r\n]+", " ", str(msg.get(name) or ""))
+    return re.sub(r"\s+", " ", value).strip()[:limit]
+
+
+def thread_topic(msg: EmailMessage) -> str:
+    """Outlook 的会话主题（不带 Re: 的原始主题）。"""
+    return _header(msg, "Thread-Topic", 200)
+
+
+def thread_index(msg: EmailMessage) -> str:
+    """Outlook 的会话索引（base64 二进制串）。"""
+    return _header(msg, "Thread-Index", 400)
+
+
+def apply_thread_headers(
+    reply: EmailMessage, parent: EmailMessage, reply_to: str = ""
+) -> None:
+    """把 reply 接回 parent 所在的会话。
+
+    Gmail / QQ 这类客户端只认 `In-Reply-To` + `References`；Outlook（Exchange）
+    的会话视图按 `Thread-Index` 归组，缺了它即使主题和 References 都对，也会
+    被拆成一封新邮件。所以父邮件带这两个头时原样抄过来。
+
+    这三个头装的都是 Message-ID / base64 串，必须原样发送，走 `set_raw_header`
+    而不是普通赋值（否则长 id 会被折成 RFC 2047 编码，见其注释）。
+    """
+    parent_id = reply_to or message_id(parent)
+    if parent_id:
+        set_raw_header(reply, "In-Reply-To", parent_id)
+    refs = " ".join(value for value in (references(parent), parent_id) if value)
+    if refs:
+        set_raw_header(reply, "References", refs)
+    topic = thread_topic(parent)
+    if topic:
+        reply["Thread-Topic"] = topic
+    index = thread_index(parent)
+    if index:
+        set_raw_header(reply, "Thread-Index", index)
 
 
 def received_at(msg: EmailMessage) -> str:

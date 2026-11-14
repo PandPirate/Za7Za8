@@ -102,6 +102,13 @@ def main(argv=None) -> int:
         return 2
 
     processed = 0
+    if not args.dry_run:
+        # 过了零点再跑时，把前一天没回复的 pending 标成未完成
+        closed = habit_tracker.close_overdue(
+            datetime.now(CST).date().isoformat(), args.db
+        )
+        if closed:
+            print("已把 {} 条超时未回复的打卡标为未完成".format(closed))
     try:
         for uid in inbox.search_recent(
             conn, args.since_days, args.limit, habit_tracker.SUBJECT
@@ -157,12 +164,9 @@ def main(argv=None) -> int:
                 datetime.now(CST),
                 inbox.reply_subject(subject, habit_tracker.SUBJECT),
             )
-            reply["In-Reply-To"] = message_id
-            refs = " ".join(
-                value for value in (inbox.references(header), message_id) if value
-            )
-            if refs:
-                reply["References"] = refs
+            # In-Reply-To / References 给 Gmail、QQ 用；Thread-Index / Thread-Topic
+            # 给 Outlook 用，否则同一主题也会被拆成一封新邮件。
+            inbox.apply_thread_headers(reply, header, message_id)
             try:
                 send_message(reply, cfg)
             except Exception as exc:
