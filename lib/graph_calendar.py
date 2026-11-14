@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
@@ -404,6 +404,22 @@ def _utc(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _match_key(subject, start_text) -> Tuple[str, str]:
+    """去重键：完整标题 + 裁到分钟的开始时间。
+
+    标题必须原样比，不能截断——截断会让「曼城 vs 曼联」和「曼城 vs 曼联二队」撞车。
+    """
+    return ((subject or ""), _minute(start_text))
+
+
+def _unique_events(events) -> List:
+    """同一批里标题 + 开始时间相同的只留最后一条，避免一次就写两份。"""
+    unique = {}
+    for event in events:
+        unique[_match_key(event.subject, _utc(event.start))] = event
+    return list(unique.values())
+
+
 def _payload(event) -> Dict:
     return {
         "subject": event.subject,
@@ -418,12 +434,17 @@ def _payload(event) -> Dict:
 
 
 def sync_graph(events, name: str, plan_only: bool = False) -> Dict:
-    """写进 Graph 上的日历。返回 {calendar, created, updated}。"""
+    """写进 Graph 上的日历。返回 {calendar, created, updated, deleted}。
+
+    去重键是 `subject + 开始时间（分钟）`：同一批里重复的只留一条；日历里
+    已经同键的事件只更新第一条，多出来的副本删掉——重复跑不会越写越多。
+    """
     creds = load_creds()
     if creds is None:
         raise GraphError("没配 MAILER_GRAPH_CLIENT_ID，注册步骤见 docs/outlook-graph-calendar.md")
+    events = _unique_events(events)
     if plan_only:
-        return {"calendar": name, "created": len(events), "updated": 0}
+        return {"calendar": name, "created": len(events), "updated": 0, "deleted": 0}
 
     token = access_token(creds)
     calendar_id = ensure_calendar(token, name)
@@ -433,23 +454,38 @@ def sync_graph(events, name: str, plan_only: bool = False) -> Dict:
     url = "{}/me/calendars/{}/calendarView?startDateTime={}&endDateTime={}&$select=id,subject,start&$top=200".format(
         GRAPH, calendar_id, _utc(low), _utc(high)
     )
-    existing = {}
+    existing: Dict[Tuple[str, str], List[str]] = {}
     for item in _call("GET", url, token).get("value", []):
-        # 键必须是完整 subject + 裁到分钟的开始时间：只裁时间，标题原样比
-        existing[((item.get("subject") or ""),
-                  _minute(item.get("start", {}).get("dateTime")))] = item["id"]
+        key = _match_key(item.get("subject"), (item.get("start") or {}).get("dateTime"))
+        existing.setdefault(key, []).append(item["id"])
 
-    created = updated = 0
+    created = updated = deleted = 0
     for event in events:
         body = _payload(event)
-        key = (event.subject, _minute(body["start"]["dateTime"]))
-        if key in existing:
-            _call("PATCH", "{}/me/events/{}".format(GRAPH, existing[key]), token, body)
+        key = _match_key(event.subject, body["start"]["dateTime"])
+        ids = existing.get(key) or []
+        if ids:
+            _call("PATCH", "{}/me/events/{}".format(GRAPH, ids[0]), token, body)
             updated += 1
+            for extra in ids[1:]:
+                _call("DELETE", "{}/me/events/{}".format(GRAPH, extra), token)
+                deleted += 1
         else:
             _call("POST", "{}/me/calendars/{}/events".format(GRAPH, calendar_id), token, body)
             created += 1
-    return {"calendar": name, "created": created, "updated": updated}
+        existing[key] = []  # 同一批里再来一条也不会重复 POST
+    return {"calendar": name, "created": created, "updated": updated, "deleted": deleted}
+
+
+def create_event(calendar_id: str, event, creds: Optional[Creds] = None) -> str:
+    """直接建一条事件，不走去重。测试里用来故意造副本、验证清理。"""
+    data = _call(
+        "POST",
+        "{}/me/calendars/{}/events".format(GRAPH, calendar_id),
+        access_token(creds),
+        _payload(event),
+    )
+    return data.get("id", "")
 
 
 def list_events(calendar_id: str, start: datetime, end: datetime,
@@ -473,7 +509,8 @@ def delete_event(event_id: str, creds: Optional[Creds] = None) -> None:
 class CalendarEvent:
     """要写进日历的一条日程。插件组好这个对象交给 sync()。
 
-    幂等靠 `subject + 开始时间` 去重（见 sync_graph），不需要插件再给 key。
+    幂等靠 `subject + 开始时间` 去重（见 sync_graph），不需要插件再给 key：
+    同批重复只留一条，日历里已有的副本只保留一条，多余的会被删掉。
     """
 
     subject: str
@@ -490,6 +527,7 @@ class CalendarResult:
     target: str = ""
     created: int = 0
     updated: int = 0
+    deleted: int = 0
     note: str = ""
     plan_only: bool = False
 
@@ -499,10 +537,11 @@ class CalendarResult:
             return "日历：未写入（{}）".format(self.note) if self.note else ""
         if self.plan_only:
             return "日历：演练，将同步 {} 场到「{}」".format(self.created, self.target)
-        if self.created or self.updated:
-            return "日历：新建 {} 场、更新 {} 场（「{}」）".format(
-                self.created, self.updated, self.target
-            )
+        if self.created or self.updated or self.deleted:
+            text = "日历：新建 {} 场、更新 {} 场".format(self.created, self.updated)
+            if self.deleted:
+                text += "、清理重复 {} 条".format(self.deleted)
+            return text + "（「{}」）".format(self.target)
         return "日历：已是最新（「{}」）".format(self.target)
 
 
@@ -535,5 +574,6 @@ def sync(events: List[CalendarEvent], name: str, backend: str = "auto",
         target=data.get("calendar", name),
         created=int(data.get("created", 0)),
         updated=int(data.get("updated", 0)),
+        deleted=int(data.get("deleted", 0)),
         plan_only=plan_only,
     )

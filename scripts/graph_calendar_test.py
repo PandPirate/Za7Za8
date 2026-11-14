@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Graph 日历写入自检：建测试日历 → 写事件 → 验证幂等 → 清理。
+"""Graph 日历写入自检：建测试日历 → 写事件 → 验证幂等与去重 → 清理。
 
     python scripts/graph_calendar_test.py --dry-run   # 只读演练：不往日历写事件
     python scripts/graph_calendar_test.py             # 真写一遍，跑完自动清理
@@ -123,16 +123,24 @@ def main(argv=None) -> int:
         return 1 if failures else 0
 
     try:
+        # 先清掉上次中断留下的事件，保证「首次写入」从干净状态开始
+        if calendar_id:
+            for item in gc.list_events(calendar_id, window_start, window_end, creds):
+                if str(item.get("subject", "")).startswith(PREFIX):
+                    gc.delete_event(item["id"], creds)
+
         first = gc.sync(events, args.calendar, backend="graph")
         check("首次写入", first.created == len(events) and first.updated == 0, first.line())
+
+        # 故意塞一条同标题同时间的副本，模拟历史上重复写入留下的多余日程
+        calendar_id = gc.ensure_calendar(token, args.calendar)
+        gc.create_event(calendar_id, events[0], creds)
 
         second = gc.sync(events, args.calendar, backend="graph")
         check("重复写入不产副本", second.created == 0 and second.updated == len(events),
               second.line())
+        check("清理已有重复", second.deleted == 1, second.line())
 
-        calendar_id = gc.find_calendar(token, args.calendar)
-        if not calendar_id:
-            raise gc.GraphError("写完却找不到日历「{}」".format(args.calendar))
         found = gc.list_events(calendar_id, window_start, window_end, creds)
         mine = [e for e in found if str(e.get("subject", "")).startswith(PREFIX)]
         check("事件都在", len(mine) == len(events), "{} 条".format(len(mine)))
