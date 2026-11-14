@@ -192,6 +192,20 @@ scripts/pikpak_share_dl.py
 > 顺便：`.gitignore` 里的规则决定哪些文件**不进**这个列表。本项目靠它忽略了 `__pycache__/`，
 > 验证方式是故意生成一个缓存文件后跑 `git status --short`，输出为空就说明忽略生效了。
 
+### `git ls-files --eol`
+
+列出每个文件在**索引**和**工作区**里的换行符，以及生效的 `.gitattributes` 规则：
+
+```bash
+git ls-files --eol scripts/send_premier_league.py
+# i/lf    w/lf    attr/text=auto eol=lf 	scripts/send_premier_league.py
+```
+
+`i/` 是索引（真正提交进仓库的内容），`w/` 是工作区文件。本项目要求两边都是 `lf`。
+`w/crlf` 说明工作区那份还是 Windows 换行——`.gitattributes` 只保证提交时转成 LF，
+**不会主动改写工作区文件**。这次新脚本提交时 Git 就警告
+`CRLF will be replaced by LF the next time Git touches it`，用它确认了问题出在工作区。
+
 ### `git diff` 与 `git diff -- <路径>`
 
 看**工作区**相对暂存区/HEAD 的具体改动。本项目实际用过：
@@ -223,6 +237,28 @@ git diff --numstat       # 每行「新增行数 删除行数 文件名」
 本项目用 `git diff --name-only` 拿改动文件清单逐个查行尾空白；用 `git diff --numstat`
 核对行尾换行符统一前后，改动行数有没有异常膨胀——`973 行变化` 看着像重写了整个文件，
 实际只是换行符被整体改写（CRLF ↔ LF），内容一个字没动。
+
+### `git diff --raw` 与「status 说改了，diff 却是空的」
+
+`git diff --raw` 用机器可读的一行式格式输出改动；**没有输出就表示内容没有差异**：
+
+```bash
+git diff --raw
+```
+
+真实场景：新文件提交后 Git 警告 CRLF 会被换成 LF。把工作区也转成 LF 后，
+`git status --short` 仍显示 ` M scripts/send_premier_league.py`，但 `git diff`
+和 `git diff --raw` 都是空的。这时要分清「文件内容」和「索引里记的 stat 信息」：
+
+```bash
+# 工作区内容经过 clean 过滤后，和索引里的 blob 是不是同一个对象？
+git hash-object --path scripts/send_premier_league.py scripts/send_premier_league.py
+git rev-parse :scripts/send_premier_league.py
+```
+
+两条都输出同一个哈希（本次是 `36924ef…`），就说明内容确实一样，只是索引缓存的
+文件状态过期了。`git update-index --refresh` 用来刷新这份缓存，但本次它仍报
+`needs update`；最后用 `git add <路径>` 重新登记一次，`git status` 才变干净。
 
 ### `git diff --cached`（含 `--stat`）
 
@@ -514,6 +550,16 @@ git restore scripts/pikpak_share_dl.py
 
 > **这是会真丢东西的命令**——被覆盖且没提交的改动找不回来（没进过对象库）。用之前先 `git status`
 > 看清楚要丢的是什么。丢弃前若不确定，可以先 `git stash`（见 5.3）留个底。
+
+更早的等价写法是 `git checkout -- <路径>`：
+
+```bash
+git checkout -- scripts/send_premier_league.py
+```
+
+本项目在修 CRLF 时用过一次，但它**没有**把工作区的 CRLF 改掉——Git 判断内容经
+clean 过滤后没变，就跳过了重写文件；最后是用 `sed -i 's/\r$//'` 手工转的。
+所以改换行符别指望 `checkout` / `restore`，它们是按「内容有没有变」决定写不写文件。
 
 ### `git reset` 三兄弟
 
