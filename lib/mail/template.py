@@ -36,8 +36,6 @@ def render_text(sections: Sequence, now: datetime, brand: str) -> str:
         parts.append("[{}]".format(section.title))
         parts.append(section.text.strip())
         parts.append("")
-    parts.append(rule)
-    parts.append("时间均为北京时间，数据以官方/赛会公布为准。")
     return "\n".join(parts).strip() + "\n"
 
 
@@ -93,14 +91,7 @@ def render_document(sections: Sequence, now: datetime, brand: str) -> "tuple[str
                     color:#94a3b8;margin-top:6px;">{subtitle}</div>
       </td>
     </tr>{blocks}
-    <tr>
-      <td style="padding:20px 20px 24px 20px;border-top:1px solid #eef2f7;">
-        <div style="font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;
-                    line-height:1.8;color:#94a3b8;">
-          时间均为北京时间 · 数据以官方/赛会公布为准
-        </div>
-      </td>
-    </tr>
+    <tr><td style="padding:0 0 16px 0;"></td></tr>
   </table>
 </td>
 </tr>
